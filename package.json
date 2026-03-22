@@ -4,8 +4,11 @@
 	"private": true,
 	"scripts": {
 		"deploy": "wrangler deploy",
-		"dev": "wrangler dev",
-		"start": "wrangler dev",
+		"dev": "./scripts/wrangler-dev.sh",
+		"start": "./scripts/wrangler-dev.sh",
+		"test:unit": "rm -rf .tmp/test-build && tsc -p tsconfig.test.json && node scripts/fix-test-build-imports.mjs && node --test .tmp/test-build/tests/**/*.test.js",
+		"typecheck": "tsc --noEmit",
+		"check": "npm run typecheck && npm run format:check",
 		"format": "prettier . --write",
 		"format:check": "prettier . --check"
 	},
@@ -13,7 +16,7 @@
 		"@cloudflare/workers-types": "*",
 		"prettier": "^3.1.1",
 		"typescript": "^5.0.4",
-		"wrangler": "^4.15.2"
+		"wrangler": "^4.20.0"
 	},
 	"type": "module",
 	"dependencies": {
