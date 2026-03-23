@@ -4,33 +4,41 @@
 
 使用 Cloudflare Workers 为 Cloudflare R2 提供 WebDAV 接口。
 
-当前服务声明支持 WebDAV Class 1 和 Class 2（LOCK/UNLOCK）。
+支持 WebDAV Class 1 和 Class 2（LOCK/UNLOCK）。文件 `GET` / `HEAD` 返回 `ETag` 和 `Last-Modified`；文件 `PUT`、`DELETE`、`PROPPATCH`、`COPY`、`MOVE` 支持 `If-Unmodified-Since`。
 
-文件 `GET` / `HEAD` 响应会返回 `ETag` 和 `Last-Modified`。文件 `PUT`、`DELETE`、`PROPPATCH`、`COPY` 和 `MOVE` 支持 `If-Unmodified-Since`；文件型 `PUT` / `PROPPATCH` / `COPY` / `MOVE` 成功响应也会返回新的 `ETag` 和 `Last-Modified`，可用于客户端侧的乐观并发控制，避免覆盖较新的内容。
+## 相比最初版本新增的能力
+
+| 能力           | 最初版本                           | 当前版本                                                                                                                            |
+| -------------- | ---------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| 目录元数据存储 | 依赖 R2 里的同名目录标记对象       | 使用 sidecar 保存目录死属性和锁，避免“同名文件 + 同名文件夹”冲突                                                                    |
+| 多用户鉴权     | 仅支持单个 `USERNAME` / `PASSWORD` | 支持 `AUTH_USERS` 多行 `username:password`，并兼容旧单用户配置                                                                      |
+| 文件并发控制   | 缺少明确的版本头和条件写入支持     | 文件 `GET` / `HEAD` 返回 `ETag` / `Last-Modified`，文件 `PUT` / `DELETE` / `PROPPATCH` / `COPY` / `MOVE` 支持 `If-Unmodified-Since` |
+| 本地开发适配   | 直接依赖本机 Wrangler 配置         | `npm run dev` 使用项目级 `XDG_CONFIG_HOME` 并绑定 `0.0.0.0`，更适合 Docker 环境                                                     |
 
 ## 项目结构
 
-- `src/index.ts`: Cloudflare Worker 入口 shim，转发到 `src/app/worker.ts`。
-- `src/app/`: 顶层入口与方法分发，包含 `worker.ts` 和 `dispatch.ts`。
-- `src/domain/`: 领域能力模块，按职责拆分为鉴权、路径、锁、目录 sidecar 和 R2 存储。
-- `src/webdav/http/`: HTTP 层处理器，拆分为共享逻辑、内容读取和写入变更处理。
-- `src/webdav/methods/`: WebDAV 方法处理器，拆分为属性、传输和锁相关模块。
-- `src/webdav/xml.ts` / `src/webdav/responses.ts`: XML 渲染和协议响应工厂。
-- `src/shared/`: 纯常量、类型和通用转义工具。
-- `tests/`: 轻量 Node 单测，覆盖鉴权、R2 存储、目录 sidecar 和 COPY/MOVE 路径安全回归。
-- `scripts/wrangler-dev.sh`: 本地开发包装脚本，适配 Docker 和受限环境。
+- `src/index.ts`: 入口 shim，转发到 `src/app/worker.ts`
+- `src/app/`: 顶层入口与方法分发
+- `src/domain/`: 鉴权、路径、锁、目录 sidecar、R2 存储
+- `src/webdav/`: HTTP/WebDAV 方法处理、XML 渲染、响应工厂
+- `src/shared/`: 常量、类型、通用工具
+- `tests/`: 轻量回归测试
+- `scripts/`: 本地开发和迁移脚本
 
-## 使用方式
+## 快速开始
 
-先按你的环境修改 `wrangler.toml`。
+先配置 `wrangler.toml`：
 
 ```toml
 [[r2_buckets]]
-binding = 'bucket' # <~ 需要是合法的 JavaScript 变量名，不要改
-bucket_name = 'webdav'
+binding = "bucket"
+bucket_name = "webdav"
+
+[vars]
+SIDECAR_PREFIX = ".__sidecar__"
 ```
 
-然后使用 Wrangler 部署：
+部署时推荐使用多用户密钥：
 
 ```bash
 wrangler deploy
@@ -45,20 +53,13 @@ alice:secret-1
 bob:secret-2
 ```
 
-如果未配置 `AUTH_USERS`，服务仍会回退到旧的单用户 `USERNAME` / `PASSWORD`。
+未配置 `AUTH_USERS` 时，仍会回退到旧的 `USERNAME` / `PASSWORD`。
 
-## 目录元数据模型
+## 目录与迁移
 
-目录元数据不再依赖 R2 里的同名目录标记对象。Worker 会把目录死属性和锁状态存进 `.__sidecar__/<path>.json` 这样的内部 sidecar，对接第三方 R2 客户端时可以避免“同名文件 + 同名文件夹”的冲突。
+目录死属性和锁状态保存在 `.__sidecar__/<path>.json` 这样的内部 sidecar 中，不再依赖 R2 里的同名目录标记对象。这样可以避免第三方 R2 客户端场景下的“同名文件 + 同名文件夹”冲突。
 
-默认内部保留前缀是 `.__sidecar__`。WebDAV 请求不能直接读写这个前缀，`COPY` / `MOVE` 到这个前缀下也会被拒绝。你也可以通过 `wrangler.toml` 里的 `SIDECAR_PREFIX` 改成别的名字。
-
-```toml
-[vars]
-SIDECAR_PREFIX = ".__sidecar__"
-```
-
-如果你的存储桶里还保留旧的目录标记对象，在和其他 R2 客户端混用前先迁移：
+如果你的存储桶里还有旧目录标记对象，先开启远程 R2 绑定再迁移：
 
 ```toml
 [[r2_buckets]]
@@ -72,51 +73,32 @@ node scripts/migrate-directory-sidecars.mjs --dry-run
 node scripts/migrate-directory-sidecars.mjs
 ```
 
-迁移脚本通过 Wrangler 平台代理访问配置好的 R2 绑定，并使用当前 `SIDECAR_PREFIX` 配置生成 sidecar 路径；它会优先复用或校验已有 sidecar，不会盲目覆盖，只有在写入或校验成功后才删除旧标记对象。
-
 ## 开发
 
-使用 `wrangler` 时，可以通过下面这些命令完成本地开发和部署：
-
 ```sh
-# 安装依赖
-$ npm ci
-
-# 启动本地 Worker（带本地服务、监听等开发能力）
-$ npm run dev
-
-# 仅运行 TypeScript 类型检查
-$ npm run typecheck
-
-# 运行类型检查和格式检查
-$ npm run check
-
-# 运行轻量单元测试
-$ npm run test:unit
-
-# 部署到 Cloudflare 全球网络（部署前先更新 wrangler.toml 配置）
-$ npm run deploy
+npm ci
+npm run dev
+npm run typecheck
+npm run check
+npm run test:unit
+npm run deploy
 ```
 
-`npm run dev` 现在会用项目内的 `XDG_CONFIG_HOME` 包装 Wrangler，并绑定到 `0.0.0.0`，这样可以避免本地配置权限问题，也更适合 Docker 开发环境。
-开发凭据建议放在本地 `.dev.vars` 文件中，优先使用 `AUTH_USERS`，例如：
+`npm run dev` 会使用项目内 `XDG_CONFIG_HOME` 并绑定 `0.0.0.0`，适合 Docker 环境。开发时建议在 `.dev.vars` 中配置：
 
 ```text
 AUTH_USERS="alice:secret-1
 bob:secret-2"
 ```
 
-若只需要单用户，也可以继续使用 `USERNAME` 和 `PASSWORD`。
-临时构建产物会落到 `.tmp/`，并且 `.prettierignore` 已排除该目录，因此运行单测后 `npm run check` 仍然可以通过。
+单用户场景仍可继续使用 `USERNAME` 和 `PASSWORD`。
 
 ## 测试
 
-本地快速回归建议使用 `npm run test:unit`，WebDAV 集成验证建议使用 [litmus](https://github.com/notroj/litmus)。
+本地快速回归使用 `npm run test:unit`，WebDAV 集成验证建议使用 [litmus](https://github.com/notroj/litmus)：
 
 ```bash
 litmus -k http://127.0.0.1:8787/ <user> <pass>
 ```
 
-当前单测主要覆盖鉴权解析、存储行为、目录 sidecar，以及 COPY/MOVE 的安全保护逻辑。
-GitHub Actions 会基于 `wrangler dev --local` 运行 `basic`、`copymove`、`props` 和 `locks` 四组 litmus 测试。
-`http` 测试套件目前仍被排除，因为本地 Workers 运行时在 `Expect: 100-continue` 的中间响应检查上依然会超时。
+当前单测主要覆盖鉴权、目录 sidecar、存储行为和 COPY/MOVE 安全逻辑。GitHub Actions 还会跑 `basic`、`copymove`、`props`、`locks` 四组 litmus 测试；`http` 套件仍因本地 Workers 的 `Expect: 100-continue` 限制被排除。
