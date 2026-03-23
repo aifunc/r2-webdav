@@ -14,6 +14,7 @@ import type { DeadProperty, DirectorySidecar, SidecarConfig } from '../../shared
 import { getDeadPropertyKey, parseProppatchRequest } from '../xml';
 import { createTextResponse, xmlResponse } from '../responses';
 import { appendPropstatProperties, isProtectedProperty, renderProppatchResponse } from './property-shared';
+import { assertUnmodifiedSince, buildResourceVersionHeaders } from '../http/shared';
 
 async function readDirectorySidecar(
 	bucket: R2Bucket,
@@ -53,6 +54,10 @@ export async function handleProppatch(
 		bucket.head(resourcePath),
 		readDirectorySidecar(bucket, resourcePath, sidecarConfig),
 	]);
+	let preconditionResponse = assertUnmodifiedSince(request, object);
+	if (preconditionResponse !== null) {
+		return preconditionResponse;
+	}
 
 	let parsedRequest = parseProppatchRequest(await request.text());
 	if (parsedRequest === null) {
@@ -124,6 +129,7 @@ export async function handleProppatch(
 	}
 
 	let hasFailures = failedSetProperties.length > 0 || failedRemoveProperties.length > 0;
+	let responseHeaders: HeadersInit = {};
 	if (!hasFailures) {
 		if (isDirectory) {
 			let nextSidecar: DirectorySidecar = { kind: 'directory' };
@@ -150,6 +156,7 @@ export async function handleProppatch(
 			if (!updated) {
 				return createTextResponse('notFound');
 			}
+			responseHeaders = buildResourceVersionHeaders(updated);
 		}
 	}
 
@@ -170,5 +177,5 @@ export async function handleProppatch(
 			key: resourcePath,
 			customMetadata: { resourcetype: '<collection />' },
 		} as unknown as R2Object);
-	return xmlResponse(renderProppatchResponse(responseObject, propstats));
+	return xmlResponse(renderProppatchResponse(responseObject, propstats), 207, responseHeaders);
 }

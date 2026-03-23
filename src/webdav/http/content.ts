@@ -3,7 +3,7 @@ import { listCollectionChildren, resolveResource } from '../../domain/storage';
 import { DEFAULT_SIDECAR_CONFIG } from '../../shared/sidecar';
 import type { SidecarConfig } from '../../shared/types';
 import { escapeXml } from '../xml';
-import { createTextResponse } from './shared';
+import { buildResourceVersionHeaders, createTextResponse } from './shared';
 
 const OBJECT_RESPONSE_METADATA_HEADERS = [
 	{
@@ -35,6 +35,7 @@ function buildObjectResponseHeaders(object: R2ObjectBody, rangeOffset: number, r
 		'Content-Type': object.httpMetadata?.contentType ?? 'application/octet-stream',
 		'Content-Length': contentLength.toString(),
 	});
+	buildResourceVersionHeaders(object).forEach((value, name) => headers.set(name, value));
 
 	if (object.range !== undefined) {
 		headers.set('Content-Range', `bytes ${rangeOffset}-${rangeEnd}/${object.size}`);

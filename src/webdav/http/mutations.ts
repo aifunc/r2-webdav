@@ -4,7 +4,13 @@ import { getDirectorySidecarKey, serializeDirectorySidecar } from '../../domain/
 import { deleteDirectorySidecars, hasCollectionResourceOrImplicit, resolveResource } from '../../domain/storage';
 import { DEFAULT_SIDECAR_CONFIG } from '../../shared/sidecar';
 import type { SidecarConfig } from '../../shared/types';
-import { noContentResponse, createTextResponse, ensureParentCollectionResource } from './shared';
+import {
+	assertUnmodifiedSince,
+	buildResourceVersionHeaders,
+	noContentResponse,
+	createTextResponse,
+	ensureParentCollectionResource,
+} from './shared';
 
 async function deleteListedObjects(bucket: R2Bucket, prefix?: string): Promise<void> {
 	let cursor: string | undefined = undefined;
@@ -38,18 +44,27 @@ export async function handlePut(
 	}
 
 	let existing = await bucket.head(resourcePath);
+	let preconditionResponse = assertUnmodifiedSince(request, existing);
+	if (preconditionResponse !== null) {
+		return preconditionResponse;
+	}
 	let parentResponse = await ensureParentCollectionResource(bucket, resourcePath, sidecarConfig);
 	if (parentResponse !== null) {
 		return parentResponse;
 	}
 
 	let body = await request.arrayBuffer();
-	await bucket.put(resourcePath, body, {
+	let stored = await bucket.put(resourcePath, body, {
 		onlyIf: request.headers,
 		httpMetadata: request.headers,
 		customMetadata: getPreservedCustomMetadata(existing?.customMetadata),
 	});
-	return existing === null ? new Response('', { status: 201 }) : noContentResponse();
+	if (stored === null) {
+		return createTextResponse('preconditionFailed');
+	}
+
+	let headers = buildResourceVersionHeaders(stored);
+	return existing === null ? new Response('', { status: 201, headers }) : noContentResponse(headers);
 }
 
 export async function handleDelete(
@@ -71,6 +86,10 @@ export async function handleDelete(
 	let resolved = await resolveResource(bucket, resourcePath, sidecarConfig);
 	if (resolved === null) {
 		return createTextResponse('notFound');
+	}
+	let preconditionResponse = assertUnmodifiedSince(request, resolved.object);
+	if (preconditionResponse !== null) {
+		return preconditionResponse;
 	}
 	if (!resolved.isCollection) {
 		await bucket.delete(resourcePath);

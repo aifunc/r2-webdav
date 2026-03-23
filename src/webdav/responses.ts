@@ -15,6 +15,7 @@ import {
 } from '../domain/storage';
 import type { DirectorySidecar, SidecarConfig } from '../shared/types';
 import { DEFAULT_SIDECAR_CONFIG } from '../shared/sidecar';
+import { buildResourceVersionHeaders } from './http/shared';
 
 export type ResponseDepthHandler = () => Promise<Response>;
 export type DestinationTarget = {
@@ -58,12 +59,11 @@ export function createTextResponse(templateName: ResponseTemplateName): Response
 }
 
 export function xmlResponse(body: string, status: number = 207, headers: HeadersInit = {}): Response {
+	let responseHeaders = new Headers(headers);
+	responseHeaders.set('Content-Type', 'application/xml; charset=utf-8');
 	return new Response(body, {
 		status,
-		headers: {
-			'Content-Type': 'application/xml; charset=utf-8',
-			...headers,
-		},
+		headers: responseHeaders,
 	});
 }
 
@@ -85,12 +85,13 @@ export function transferCompletedResponse(
 	destinationExists: boolean,
 	destination: string,
 	isCollection: boolean,
+	headers: HeadersInit = {},
 ): Response {
 	if (destinationExists) {
-		return new Response(null, { status: 204 });
+		return new Response(null, { status: 204, headers });
 	}
 
-	return createdResponse(destination, isCollection);
+	return createdResponse(destination, isCollection, '', headers);
 }
 
 export function resolveDepthHandler<T>(depth: string, handlers: Record<string, T>): T | null {
@@ -141,9 +142,9 @@ export async function transferOrNotFound(
 	destination: string,
 	customMetadata: Record<string, string>,
 	options: { deleteSource?: boolean } = {},
-): Promise<Response | null> {
+): Promise<Response | Headers | null> {
 	let transferred = await transferObject(bucket, resource, destination, customMetadata, options);
-	return transferred ? null : createTextResponse('notFound');
+	return transferred ? buildResourceVersionHeaders(transferred) : createTextResponse('notFound');
 }
 
 export async function transferCollectionOrNotFound(
@@ -170,12 +171,15 @@ export async function transferCollectionOrNotFound(
 }
 
 export function completeTransfer(
-	transferResponse: Response | null,
+	transferResponse: Response | Headers | null,
 	destinationExists: boolean,
 	destination: string,
 	isCollection: boolean,
 ): Response {
-	return transferResponse ?? transferCompletedResponse(destinationExists, destination, isCollection);
+	if (transferResponse instanceof Response) {
+		return transferResponse;
+	}
+	return transferCompletedResponse(destinationExists, destination, isCollection, transferResponse ?? {});
 }
 
 export function validateCollectionDestination(

@@ -5,6 +5,7 @@ import { resolveResource } from '../../domain/storage';
 import { DEFAULT_SIDECAR_CONFIG } from '../../shared/sidecar';
 import type { SidecarConfig } from '../../shared/types';
 import { handleDelete } from '../http/handlers';
+import { assertUnmodifiedSince } from '../http/shared';
 import {
 	buildForwardedDeleteHeaders,
 	completeTransfer,
@@ -47,11 +48,20 @@ export async function handleCopy(
 		return parentResponse;
 	}
 
+	let destinationObject = await bucket.head(destination);
 	let destinationExists = resource.isCollection
-		? (await resolveResource(bucket, destination, sidecarConfig)) !== null
-		: (await bucket.head(destination)) !== null;
+		? destinationObject !== null || (await resolveResource(bucket, destination, sidecarConfig)) !== null
+		: destinationObject !== null;
 	if (overwriteDisabled && destinationExists) {
 		return createTextResponse('preconditionFailed');
+	}
+	let sourcePreconditionResponse = assertUnmodifiedSince(request, resource.object);
+	if (sourcePreconditionResponse !== null) {
+		return sourcePreconditionResponse;
+	}
+	let destinationPreconditionResponse = assertUnmodifiedSince(request, destinationObject);
+	if (destinationPreconditionResponse !== null) {
+		return destinationPreconditionResponse;
 	}
 
 	if (resource.isCollection) {
@@ -94,11 +104,7 @@ export async function handleCopy(
 		destination,
 		stripLockMetadata(resource.object.customMetadata),
 	);
-	if (copyResponse !== null) {
-		return copyResponse;
-	}
-
-	return transferCompletedResponse(destinationExists, destination, false);
+	return completeTransfer(copyResponse, destinationExists, destination, false);
 }
 
 export async function handleMove(
@@ -139,11 +145,20 @@ export async function handleMove(
 		return parentResponse;
 	}
 
+	let destinationObject = await bucket.head(destination);
 	let destinationExists = resource.isCollection
-		? (await resolveResource(bucket, destination, sidecarConfig)) !== null
-		: (await bucket.head(destination)) !== null;
+		? destinationObject !== null || (await resolveResource(bucket, destination, sidecarConfig)) !== null
+		: destinationObject !== null;
 	if (!overwrite && destinationExists) {
 		return createTextResponse('preconditionFailed');
+	}
+	let sourcePreconditionResponse = assertUnmodifiedSince(request, resource.object);
+	if (sourcePreconditionResponse !== null) {
+		return sourcePreconditionResponse;
+	}
+	let destinationPreconditionResponse = assertUnmodifiedSince(request, destinationObject);
+	if (destinationPreconditionResponse !== null) {
+		return destinationPreconditionResponse;
 	}
 
 	if (destinationExists) {
@@ -187,9 +202,5 @@ export async function handleMove(
 		getPreservedCustomMetadata(resource.object.customMetadata),
 		{ deleteSource: true },
 	);
-	if (moveResponse !== null) {
-		return moveResponse;
-	}
-
-	return transferCompletedResponse(destinationExists, destination, false);
+	return completeTransfer(moveResponse, destinationExists, destination, false);
 }

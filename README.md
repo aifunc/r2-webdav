@@ -6,6 +6,8 @@
 
 当前服务声明支持 WebDAV Class 1 和 Class 2（LOCK/UNLOCK）。
 
+文件 `GET` / `HEAD` 响应会返回 `ETag` 和 `Last-Modified`。文件 `PUT`、`DELETE`、`PROPPATCH`、`COPY` 和 `MOVE` 支持 `If-Unmodified-Since`；文件型 `PUT` / `PROPPATCH` / `COPY` / `MOVE` 成功响应也会返回新的 `ETag` 和 `Last-Modified`，可用于客户端侧的乐观并发控制，避免覆盖较新的内容。
+
 ## 项目结构
 
 - `src/index.ts`: Cloudflare Worker 入口 shim，转发到 `src/app/worker.ts`。
@@ -33,9 +35,17 @@ bucket_name = 'webdav'
 ```bash
 wrangler deploy
 
-wrangler secret put USERNAME
-wrangler secret put PASSWORD
+wrangler secret put AUTH_USERS
 ```
+
+`AUTH_USERS` 使用简单文本格式，每行一组账号，格式为 `username:password`，例如：
+
+```text
+alice:secret-1
+bob:secret-2
+```
+
+如果未配置 `AUTH_USERS`，服务仍会回退到旧的单用户 `USERNAME` / `PASSWORD`。
 
 ## 目录元数据模型
 
@@ -89,7 +99,14 @@ $ npm run deploy
 ```
 
 `npm run dev` 现在会用项目内的 `XDG_CONFIG_HOME` 包装 Wrangler，并绑定到 `0.0.0.0`，这样可以避免本地配置权限问题，也更适合 Docker 开发环境。
-开发凭据应放在本地 `.dev.vars` 文件中，包含 `USERNAME` 和 `PASSWORD`。
+开发凭据建议放在本地 `.dev.vars` 文件中，优先使用 `AUTH_USERS`，例如：
+
+```text
+AUTH_USERS="alice:secret-1
+bob:secret-2"
+```
+
+若只需要单用户，也可以继续使用 `USERNAME` 和 `PASSWORD`。
 临时构建产物会落到 `.tmp/`，并且 `.prettierignore` 已排除该目录，因此运行单测后 `npm run check` 仍然可以通过。
 
 ## 测试

@@ -463,7 +463,7 @@ export async function transferDirectoryResources(
 
 	let sidecarPaths = new Set(sidecarEntries.map((entry) => entry.resourcePath));
 	let legacyMarkers: { resourcePath: string; object: R2Object; sidecar: DirectorySidecar }[] = [];
-	let transferPromises: Promise<boolean>[] = [];
+	let transferPromises: Promise<R2Object | null>[] = [];
 	let deleteKeys: string[] = [];
 
 	if (includeDescendants) {
@@ -565,13 +565,13 @@ async function writeStoredObject(
 		httpMetadata?: R2HTTPMetadata;
 		deleteSource?: boolean;
 	},
-): Promise<boolean> {
+): Promise<R2Object | null> {
 	let source = await bucket.get(sourceKey);
 	if (source === null) {
-		return false;
+		return null;
 	}
 
-	await bucket.put(targetKey, source.body, {
+	let stored = await bucket.put(targetKey, source.body, {
 		httpMetadata: options.httpMetadata ?? source.httpMetadata,
 		customMetadata: options.customMetadata,
 	});
@@ -580,7 +580,7 @@ async function writeStoredObject(
 		await bucket.delete(sourceKey);
 	}
 
-	return true;
+	return stored;
 }
 
 export async function transferObject(
@@ -589,7 +589,7 @@ export async function transferObject(
 	target: string,
 	customMetadata: Record<string, string>,
 	options: { deleteSource?: boolean } = {},
-): Promise<boolean> {
+): Promise<R2Object | null> {
 	return writeStoredObject(bucket, object.key, target, {
 		httpMetadata: object.httpMetadata,
 		customMetadata,
@@ -602,7 +602,7 @@ export async function rewriteStoredObject(
 	key: string,
 	customMetadata: Record<string, string>,
 	httpMetadata?: R2HTTPMetadata,
-): Promise<boolean> {
+): Promise<R2Object | null> {
 	return writeStoredObject(bucket, key, key, {
 		httpMetadata,
 		customMetadata,
