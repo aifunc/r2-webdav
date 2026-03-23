@@ -175,3 +175,12 @@ dist
 .worktrees/
 debug.log
 child.log
+
+docs/superpowers/
+.github/
+.editorconfig
+.prettierignore
+.prettierrc
+tests/
+scripts/
+.gitignore
