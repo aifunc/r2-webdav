@@ -249,15 +249,15 @@ function hasSameDirectoryLocks(left: LockDetails[] | undefined, right: LockDetai
 
 	return leftLocks.every((leftLock, index) => {
 		let rightLock = rightLocks[index];
-		return leftLock.token !== rightLock.token ||
-			leftLock.owner !== rightLock.owner ||
-			leftLock.scope !== rightLock.scope ||
-			leftLock.depth !== rightLock.depth ||
-			leftLock.timeout !== rightLock.timeout ||
-			leftLock.expiresAt !== rightLock.expiresAt ||
-			leftLock.root !== rightLock.root
-			? false
-			: true;
+		return (
+			leftLock.token === rightLock.token &&
+			leftLock.owner === rightLock.owner &&
+			leftLock.scope === rightLock.scope &&
+			leftLock.depth === rightLock.depth &&
+			leftLock.timeout === rightLock.timeout &&
+			leftLock.expiresAt === rightLock.expiresAt &&
+			leftLock.root === rightLock.root
+		);
 	});
 }
 

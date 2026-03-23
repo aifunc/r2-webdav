@@ -1,7 +1,6 @@
 import { DEAD_PROPERTY_PREFIX } from '../shared/constants';
 import { DEFAULT_SIDECAR_CONFIG, getSidecarPrefix } from '../shared/sidecar';
 import {
-	coalesceDirectoryMetadata,
 	getDirectorySidecarKey,
 	isDirectorySidecarKey,
 	legacyMarkerToSidecar,
@@ -123,13 +122,18 @@ async function hasSidecarDescendants(
 	return false;
 }
 
-async function readSidecarFromKey(bucket: R2Bucket, sidecarKey: string): Promise<DirectorySidecar | undefined> {
+async function readDirectorySidecarStateFromKey(
+	bucket: R2Bucket,
+	sidecarKey: string,
+): Promise<{ exists: boolean; sidecar: DirectorySidecar | undefined }> {
 	let object = await bucket.get(sidecarKey);
 	if (object === null) {
-		return undefined;
+		return { exists: false, sidecar: undefined };
 	}
-	let payload = await new Response(object.body).text();
-	return parseDirectorySidecar(payload);
+	return {
+		exists: true,
+		sidecar: parseDirectorySidecar(await new Response(object.body).text()),
+	};
 }
 
 async function readDirectorySidecar(
@@ -137,13 +141,7 @@ async function readDirectorySidecar(
 	resourcePath: string,
 	sidecarConfig: SidecarConfig,
 ): Promise<{ exists: boolean; sidecar: DirectorySidecar | undefined }> {
-	let sidecarKey = getDirectorySidecarKey(resourcePath, sidecarConfig);
-	let object = await bucket.get(sidecarKey);
-	if (object === null) {
-		return { exists: false, sidecar: undefined };
-	}
-	let payload = await new Response(object.body).text();
-	return { exists: true, sidecar: parseDirectorySidecar(payload) };
+	return readDirectorySidecarStateFromKey(bucket, getDirectorySidecarKey(resourcePath, sidecarConfig));
 }
 
 async function* listDirectorySidecarEntries(
@@ -305,12 +303,11 @@ export async function* listCollectionChildren(
 		if (isReservedWebdavNamespace(sidecarEntry.resourcePath, sidecarConfig)) {
 			continue;
 		}
-		let sidecarObject = await bucket.get(sidecarEntry.sidecarKey);
-		if (sidecarObject === null) {
+		let sidecarResult = await readDirectorySidecarStateFromKey(bucket, sidecarEntry.sidecarKey);
+		if (!sidecarResult.exists) {
 			continue;
 		}
-		let payload = await new Response(sidecarObject.body).text();
-		let sidecar = parseDirectorySidecar(payload);
+		let sidecar = sidecarResult.sidecar;
 		let existing = entries.get(sidecarEntry.resourcePath);
 		if (existing?.object && existing.isCollection) {
 			let directory = sidecar ?? { kind: 'directory' };

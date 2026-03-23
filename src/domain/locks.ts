@@ -199,8 +199,7 @@ async function readDirectorySidecarFromKey(
 	if (object === null) {
 		return undefined;
 	}
-	let payload = await new Response(object.body).text();
-	return parseDirectorySidecar(payload);
+	return parseDirectorySidecar(await new Response(object.body).text());
 }
 
 async function readDirectorySidecarLockDetails(
@@ -216,11 +215,6 @@ async function readDirectorySidecarLockDetails(
 	let payload = await new Response(object.body).text();
 	let sidecar = parseDirectorySidecar(payload);
 	return { exists: true, locks: sidecar?.locks ?? [] };
-}
-
-async function readDirectorySidecarLockDetailsFromKey(bucket: R2Bucket, sidecarKey: string): Promise<LockDetails[]> {
-	let sidecar = await readDirectorySidecarFromKey(bucket, sidecarKey);
-	return sidecar?.locks ?? [];
 }
 
 export async function readLockState(
@@ -417,8 +411,7 @@ export async function assertRecursiveDeletePermission(
 		}
 	}
 
-	let sidecarPrefix =
-		resourcePath === '' ? `${getSidecarPrefix(sidecarConfig)}/` : `${getSidecarPrefix(sidecarConfig)}/${resourcePath}/`;
+	let sidecarPrefix = `${getSidecarPrefix(sidecarConfig)}/${resourcePath === '' ? '' : `${resourcePath}/`}`;
 	for await (let object of listAll(bucket, sidecarPrefix, true)) {
 		if (!isDirectorySidecarKey(object.key, sidecarConfig)) {
 			continue;

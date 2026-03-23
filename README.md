@@ -2,11 +2,11 @@
 
 [![Deploy to Cloudflare Workers](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/abersheeran/r2-webdav)
 
-Use Cloudflare Workers to provide a WebDav interface for Cloudflare R2.
+使用 Cloudflare Workers 为 Cloudflare R2 提供 WebDAV 接口。
 
-Currently the server advertises WebDAV Class 1 and Class 2 (LOCK/UNLOCK) support.
+当前服务声明支持 WebDAV Class 1 和 Class 2（LOCK/UNLOCK）。
 
-## Project Structure
+## 项目结构
 
 - `src/index.ts`: Cloudflare Worker 入口 shim，转发到 `src/app/worker.ts`。
 - `src/app/`: 顶层入口与方法分发，包含 `worker.ts` 和 `dispatch.ts`。
@@ -18,17 +18,17 @@ Currently the server advertises WebDAV Class 1 and Class 2 (LOCK/UNLOCK) support
 - `tests/`: 轻量 Node 单测，覆盖鉴权、R2 存储、目录 sidecar 和 COPY/MOVE 路径安全回归。
 - `scripts/wrangler-dev.sh`: 本地开发包装脚本，适配 Docker 和受限环境。
 
-## Usage
+## 使用方式
 
-Change wrangler.toml to your own.
+先按你的环境修改 `wrangler.toml`。
 
 ```toml
 [[r2_buckets]]
-binding = 'bucket' # <~ valid JavaScript variable name, don't change this
+binding = 'bucket' # <~ 需要是合法的 JavaScript 变量名，不要改
 bucket_name = 'webdav'
 ```
 
-Then use wrangler to deploy.
+然后使用 Wrangler 部署：
 
 ```bash
 wrangler deploy
@@ -37,7 +37,7 @@ wrangler secret put USERNAME
 wrangler secret put PASSWORD
 ```
 
-## Directory Metadata Model
+## 目录元数据模型
 
 目录元数据不再依赖 R2 里的同名目录标记对象。Worker 会把目录死属性和锁状态存进 `.__sidecar__/<path>.json` 这样的内部 sidecar，对接第三方 R2 客户端时可以避免“同名文件 + 同名文件夹”的冲突。
 
@@ -64,42 +64,42 @@ node scripts/migrate-directory-sidecars.mjs
 
 迁移脚本通过 Wrangler 平台代理访问配置好的 R2 绑定，并使用当前 `SIDECAR_PREFIX` 配置生成 sidecar 路径；它会优先复用或校验已有 sidecar，不会盲目覆盖，只有在写入或校验成功后才删除旧标记对象。
 
-## Development
+## 开发
 
-With `wrangler`, you can run and deploy your Worker with the following commands:
+使用 `wrangler` 时，可以通过下面这些命令完成本地开发和部署：
 
 ```sh
-# install dependencies
+# 安装依赖
 $ npm ci
 
-# run your Worker in an ideal development workflow (with a local server, file watcher & more)
+# 启动本地 Worker（带本地服务、监听等开发能力）
 $ npm run dev
 
-# run TypeScript type checks only
+# 仅运行 TypeScript 类型检查
 $ npm run typecheck
 
-# run typecheck and formatting checks
+# 运行类型检查和格式检查
 $ npm run check
 
-# run lightweight unit tests
+# 运行轻量单元测试
 $ npm run test:unit
 
-# deploy your Worker globally to the Cloudflare network (update your wrangler.toml file for configuration)
+# 部署到 Cloudflare 全球网络（部署前先更新 wrangler.toml 配置）
 $ npm run deploy
 ```
 
-`npm run dev` now wraps Wrangler with a project-local `XDG_CONFIG_HOME` and binds to `0.0.0.0`, which avoids local config permission issues and works more reliably in Docker-based development environments.
-Development credentials should be stored in a local `.dev.vars` file with `USERNAME` and `PASSWORD`.
-Temporary build output stays under `.tmp/`, and `.prettierignore` excludes that directory so `npm run check` still passes after running unit tests.
+`npm run dev` 现在会用项目内的 `XDG_CONFIG_HOME` 包装 Wrangler，并绑定到 `0.0.0.0`，这样可以避免本地配置权限问题，也更适合 Docker 开发环境。
+开发凭据应放在本地 `.dev.vars` 文件中，包含 `USERNAME` 和 `PASSWORD`。
+临时构建产物会落到 `.tmp/`，并且 `.prettierignore` 已排除该目录，因此运行单测后 `npm run check` 仍然可以通过。
 
-## Test
+## 测试
 
-Use `npm run test:unit` for fast local regression checks, and [litmus](https://github.com/notroj/litmus) for WebDAV integration testing.
+本地快速回归建议使用 `npm run test:unit`，WebDAV 集成验证建议使用 [litmus](https://github.com/notroj/litmus)。
 
 ```bash
 litmus -k http://127.0.0.1:8787/ <user> <pass>
 ```
 
-Current unit tests cover auth parsing, storage behavior, directory sidecars, and copy/move safety guards.
-GitHub Actions runs the `basic`, `copymove`, `props`, and `locks` litmus suites against `wrangler dev --local`.
-The `http` suite is currently excluded because local Workers runs still time out on the interim `Expect: 100-continue` response check.
+当前单测主要覆盖鉴权解析、存储行为、目录 sidecar，以及 COPY/MOVE 的安全保护逻辑。
+GitHub Actions 会基于 `wrangler dev --local` 运行 `basic`、`copymove`、`props` 和 `locks` 四组 litmus 测试。
+`http` 测试套件目前仍被排除，因为本地 Workers 运行时在 `Expect: 100-continue` 的中间响应检查上依然会超时。
