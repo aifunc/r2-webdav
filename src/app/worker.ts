@@ -1,4 +1,4 @@
-import { isAuthorized } from '../domain/auth';
+import { getAuthorizedUsers, isAuthorized } from '../domain/auth';
 import { resolveSidecarConfig } from '../shared/sidecar';
 import { CORS_ALLOW_HEADERS, CORS_EXPOSE_HEADERS, SUPPORT_METHODS } from '../shared/constants';
 import type { Env } from '../shared/types';
@@ -8,7 +8,7 @@ export default {
 	async fetch(request: Request, env: Env): Promise<Response> {
 		if (
 			request.method !== 'OPTIONS' &&
-			!isAuthorized(request.headers.get('Authorization') ?? '', env.USERNAME, env.PASSWORD)
+			!isAuthorized(request.headers.get('Authorization') ?? '', getAuthorizedUsers(env))
 		) {
 			return new Response('Unauthorized', {
 				status: 401,

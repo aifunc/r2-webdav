@@ -1,5 +1,10 @@
 const BASE64_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
 
+type BasicCredentials = {
+	username: string;
+	password: string;
+};
+
 function timingSafeEqual(left: Uint8Array, right: Uint8Array): boolean {
 	if (left.byteLength !== right.byteLength) {
 		return false;
@@ -29,9 +34,48 @@ function encodeBase64(bytes: Uint8Array): string {
 	return encoded;
 }
 
-export function isAuthorized(authorizationHeader: string, username: string, password: string): boolean {
+function encodeBasicAuthorization(username: string, password: string): Uint8Array {
 	let encoder = new TextEncoder();
-	let header = encoder.encode(authorizationHeader);
-	let expected = encoder.encode(`Basic ${encodeBase64(encoder.encode(`${username}:${password}`))}`);
-	return timingSafeEqual(header, expected);
+	return encoder.encode(`Basic ${encodeBase64(encoder.encode(`${username}:${password}`))}`);
+}
+
+function parseAuthorizedUsers(authUsers: string | undefined): BasicCredentials[] {
+	return String(authUsers ?? '')
+		.split(/\r?\n/)
+		.flatMap((line) => {
+			let separatorIndex = line.indexOf(':');
+			if (separatorIndex <= 0) {
+				return [];
+			}
+
+			return [
+				{
+					username: line.slice(0, separatorIndex).trim(),
+					password: line.slice(separatorIndex + 1),
+				},
+			];
+		})
+		.filter((entry) => entry.username !== '');
+}
+
+export function getAuthorizedUsers(env: {
+	AUTH_USERS?: string;
+	USERNAME?: string;
+	PASSWORD?: string;
+}): BasicCredentials[] {
+	let authorizedUsers = parseAuthorizedUsers(env.AUTH_USERS);
+	if (authorizedUsers.length > 0) {
+		return authorizedUsers;
+	}
+	if (typeof env.USERNAME !== 'string' || typeof env.PASSWORD !== 'string') {
+		return [];
+	}
+	return [{ username: env.USERNAME, password: env.PASSWORD }];
+}
+
+export function isAuthorized(authorizationHeader: string, authorizedUsers: BasicCredentials[]): boolean {
+	let header = new TextEncoder().encode(authorizationHeader);
+	return authorizedUsers.some((entry) =>
+		timingSafeEqual(header, encodeBasicAuthorization(entry.username, entry.password)),
+	);
 }

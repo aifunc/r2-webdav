@@ -22,4 +22,4 @@
 
 ## Security & Configuration Tips
 
-不要提交真实的 `USERNAME`、`PASSWORD`、`.dev.vars` 或 Cloudflare 凭据。修改 `wrangler.toml` 时，保持 `bucket` 绑定名称与代码中的 `Env.bucket` 一致。`SIDECAR_PREFIX` 指向的前缀是内部保留命名空间，业务逻辑和迁移脚本都不能把它当作用户可见资源处理。新增本地脚本或测试产物时，确认临时目录继续落在 `.tmp/`，不要把生成文件带入版本库。
+不要提交真实的 `AUTH_USERS`、`USERNAME`、`PASSWORD`、`.dev.vars` 或 Cloudflare 凭据。多用户鉴权优先使用 `AUTH_USERS`，格式是每行一组 `username:password`；`USERNAME` / `PASSWORD` 仅作为单用户回退配置。修改 `wrangler.toml` 时，保持 `bucket` 绑定名称与代码中的 `Env.bucket` 一致。`SIDECAR_PREFIX` 指向的前缀是内部保留命名空间，业务逻辑和迁移脚本都不能把它当作用户可见资源处理。新增本地脚本或测试产物时，确认临时目录继续落在 `.tmp/`，不要把生成文件带入版本库。
