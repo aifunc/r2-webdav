@@ -4,6 +4,7 @@ import path from 'node:path';
 import process from 'node:process';
 
 const DEAD_PROPERTY_PREFIX = 'dead_property:';
+const DEFAULT_SIDECAR_PREFIX = '.__sidecar__';
 const DEFAULT_LOCK_TIMEOUT = 3600;
 const DEFAULT_OPTIONS = {
 	allowLocal: false,
@@ -99,13 +100,17 @@ function normalizeResourcePath(resourcePath) {
 	return String(resourcePath ?? '').replace(/^\/+|\/+$/g, '');
 }
 
-function getDirectorySidecarKey(resourcePath) {
+function getDirectorySidecarKey(resourcePath, sidecarPrefix) {
 	const normalized = normalizeResourcePath(resourcePath);
-	return normalized === '' ? '.__webdav__/directories/.json' : `.__webdav__/directories/${normalized}.json`;
+	return normalized === '' ? `${sidecarPrefix}/.json` : `${sidecarPrefix}/${normalized}.json`;
 }
 
-function isReservedWebdavPath(resourcePath) {
-	return resourcePath === '.__webdav__' || resourcePath.startsWith('.__webdav__/');
+function isReservedWebdavPath(resourcePath, sidecarPrefix) {
+	return resourcePath === sidecarPrefix || resourcePath.startsWith(`${sidecarPrefix}/`);
+}
+
+function getConfiguredSidecarPrefix(config) {
+	return normalizeResourcePath(config.vars?.SIDECAR_PREFIX) || DEFAULT_SIDECAR_PREFIX;
 }
 
 function readDeadProperties(metadata) {
@@ -339,6 +344,7 @@ try {
 		env: options.environment,
 	});
 	const bucketConfig = getSelectedBucket(config, options.binding);
+	const sidecarPrefix = getConfiguredSidecarPrefix(config);
 
 	if (bucketConfig.remote !== true && !options.allowLocal) {
 		throw new Error(
@@ -369,7 +375,7 @@ try {
 
 		for await (const object of listAll(bucket, options.prefix ?? '')) {
 			summary.scannedObjects += 1;
-			if (isReservedWebdavPath(object.key)) {
+			if (isReservedWebdavPath(object.key, sidecarPrefix)) {
 				continue;
 			}
 			if (!matchesPrefix(object.key, options.prefix)) {
@@ -384,7 +390,7 @@ try {
 			}
 
 			summary.legacyMarkers += 1;
-			const sidecarKey = getDirectorySidecarKey(object.key);
+			const sidecarKey = getDirectorySidecarKey(object.key, sidecarPrefix);
 			const existingSidecarObject = await bucket.get(sidecarKey);
 			if (existingSidecarObject === null) {
 				logAction(options.dryRun ? 'plan' : 'write', object.key, `-> ${sidecarKey}`);
@@ -426,6 +432,7 @@ Existing sidecars validated: ${summary.validatedSidecars}
 Conflicts: ${summary.conflicts}
 Mode: ${options.dryRun ? 'dry-run' : 'apply'}
 Binding: ${bucketConfig.binding} (${bucketConfig.bucket_name})
+Sidecar prefix: ${sidecarPrefix}
 \n`);
 
 		if (summary.conflicts > 0) {

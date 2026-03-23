@@ -10,6 +10,9 @@ compatibility_flags = ["nodejs_compat"]
 binding = "bucket" # <~ valid JavaScript variable name
 bucket_name = "webdav"
 
+[vars]
+SIDECAR_PREFIX = ".__sidecar__"
+
 # Docs: https://developers.cloudflare.com/workers/observability/logs/workers-logs/#enable-workers-logs
 [observability]
 enabled = true

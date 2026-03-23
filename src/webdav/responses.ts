@@ -13,7 +13,8 @@ import {
 	transferDirectoryResources,
 	transferObject,
 } from '../domain/storage';
-import type { DirectorySidecar } from '../shared/types';
+import type { DirectorySidecar, SidecarConfig } from '../shared/types';
+import { DEFAULT_SIDECAR_CONFIG } from '../shared/sidecar';
 
 export type ResponseDepthHandler = () => Promise<Response>;
 export type DestinationTarget = {
@@ -96,7 +97,11 @@ export function resolveDepthHandler<T>(depth: string, handlers: Record<string, T
 	return handlers[depth] ?? null;
 }
 
-export function resolveDestinationTarget(request: Request, resourcePath: string): DestinationTarget | Response {
+export function resolveDestinationTarget(
+	request: Request,
+	resourcePath: string,
+	sidecarConfig: SidecarConfig = DEFAULT_SIDECAR_CONFIG,
+): DestinationTarget | Response {
 	let destinationHeader = request.headers.get('Destination');
 	if (destinationHeader === null) {
 		return createTextResponse('badRequest');
@@ -105,7 +110,7 @@ export function resolveDestinationTarget(request: Request, resourcePath: string)
 	let destination = parseDestinationPath(destinationHeader, request.url);
 	if (
 		destination === null ||
-		isReservedWebdavNamespace(destination) ||
+		isReservedWebdavNamespace(destination, sidecarConfig) ||
 		isSameOrDescendantPath(resourcePath, destination)
 	) {
 		return createTextResponse('badRequest');
@@ -117,9 +122,13 @@ export function resolveDestinationTarget(request: Request, resourcePath: string)
 	};
 }
 
-export async function ensureDestinationParentExists(bucket: R2Bucket, destination: string): Promise<Response | null> {
+export async function ensureDestinationParentExists(
+	bucket: R2Bucket,
+	destination: string,
+	sidecarConfig: SidecarConfig = DEFAULT_SIDECAR_CONFIG,
+): Promise<Response | null> {
 	let parentPath = getParentPath(destination);
-	if (await hasCollectionResourceOrImplicit(bucket, parentPath)) {
+	if (await hasCollectionResourceOrImplicit(bucket, parentPath, sidecarConfig)) {
 		return null;
 	}
 
@@ -142,13 +151,21 @@ export async function transferCollectionOrNotFound(
 	resourcePath: string,
 	destination: string,
 	mapMetadata: (object: R2Object) => Record<string, string>,
+	sidecarConfig: SidecarConfig = DEFAULT_SIDECAR_CONFIG,
 	options: {
 		deleteSource?: boolean;
 		includeDescendants?: boolean;
 		mapSidecar?: (sidecar: DirectorySidecar) => DirectorySidecar;
 	} = {},
 ): Promise<Response | null> {
-	let transferred = await transferDirectoryResources(bucket, resourcePath, destination, mapMetadata, options);
+	let transferred = await transferDirectoryResources(
+		bucket,
+		resourcePath,
+		destination,
+		mapMetadata,
+		sidecarConfig,
+		options,
+	);
 	return transferred ? null : createTextResponse('notFound');
 }
 
@@ -189,13 +206,14 @@ export async function loadTransferResource(
 	bucket: R2Bucket,
 	resourcePath: string,
 	destination: string,
+	sidecarConfig: SidecarConfig = DEFAULT_SIDECAR_CONFIG,
 	validateDestination: (
 		resourcePath: string,
 		isCollection: boolean,
 		destination: string,
 	) => Response | null = validateCollectionDestination,
 ): Promise<TransferResource | Response> {
-	let resource = await resolveResource(bucket, resourcePath);
+	let resource = await resolveResource(bucket, resourcePath, sidecarConfig);
 	if (resource === null) {
 		return createTextResponse('notFound');
 	}

@@ -1,10 +1,12 @@
 import { DAV_CLASS, SUPPORT_METHODS } from '../shared/constants';
+import { DEFAULT_SIDECAR_CONFIG } from '../shared/sidecar';
 import { createTextResponse } from '../webdav/responses';
 import { handleDelete, handleGet, handleHead, handleMkcol, handlePut } from '../webdav/http/handlers';
 import { handleCopy, handleLock, handleMove, handlePropfind, handleProppatch, handleUnlock } from '../webdav/index.js';
 import { isReservedWebdavNamespace, makeResourcePath } from '../domain/path';
+import type { SidecarConfig } from '../shared/types';
 
-type MethodHandler = (request: Request, bucket: R2Bucket) => Promise<Response>;
+type MethodHandler = (request: Request, bucket: R2Bucket, sidecarConfig: SidecarConfig) => Promise<Response>;
 
 function buildDavHeaders(): HeadersInit {
 	return {
@@ -41,9 +43,13 @@ const METHOD_HANDLERS: Record<string, MethodHandler> = {
 	UNLOCK: handleUnlock,
 };
 
-export async function dispatchHandler(request: Request, bucket: R2Bucket): Promise<Response> {
+export async function dispatchHandler(
+	request: Request,
+	bucket: R2Bucket,
+	sidecarConfig: SidecarConfig = DEFAULT_SIDECAR_CONFIG,
+): Promise<Response> {
 	let resourcePath = makeResourcePath(request);
-	if (isReservedWebdavNamespace(resourcePath)) {
+	if (isReservedWebdavNamespace(resourcePath, sidecarConfig)) {
 		return createTextResponse('badRequest');
 	}
 
@@ -52,5 +58,5 @@ export async function dispatchHandler(request: Request, bucket: R2Bucket): Promi
 	}
 
 	let handler = METHOD_HANDLERS[request.method];
-	return handler ? handler(request, bucket) : methodNotAllowedResponse();
+	return handler ? handler(request, bucket, sidecarConfig) : methodNotAllowedResponse();
 }

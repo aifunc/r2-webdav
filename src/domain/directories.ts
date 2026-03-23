@@ -1,5 +1,12 @@
-import { DEAD_PROPERTY_PREFIX, DIRECTORY_SIDECAR_PREFIX, RESERVED_WEBDAV_PREFIX } from '../shared/constants.js';
-import type { DeadProperty, DirectorySidecar, LegacyDirectoryMarker, LockDetails } from '../shared/types.js';
+import { DEAD_PROPERTY_PREFIX } from '../shared/constants.js';
+import { DEFAULT_SIDECAR_CONFIG, getSidecarPrefix } from '../shared/sidecar';
+import type {
+	DeadProperty,
+	DirectorySidecar,
+	LegacyDirectoryMarker,
+	LockDetails,
+	SidecarConfig,
+} from '../shared/types.js';
 import { getLockDetails } from './locks.js';
 
 const DIRECTORY_SIDECAR_SUFFIX = '.json';
@@ -104,18 +111,24 @@ function buildDirectorySidecar(
 	return sidecar;
 }
 
-export function getDirectorySidecarKey(resourcePath: string): string {
+export function getDirectorySidecarKey(
+	resourcePath: string,
+	sidecarConfig: SidecarConfig = DEFAULT_SIDECAR_CONFIG,
+): string {
+	let sidecarPrefix = getSidecarPrefix(sidecarConfig);
 	let normalized = normalizeResourcePath(resourcePath);
-	let base = normalized === '' ? `${DIRECTORY_SIDECAR_PREFIX}/` : `${DIRECTORY_SIDECAR_PREFIX}/${normalized}`;
+	let base = normalized === '' ? `${sidecarPrefix}/` : `${sidecarPrefix}/${normalized}`;
 	return `${base}${DIRECTORY_SIDECAR_SUFFIX}`;
 }
 
-export function isReservedWebdavPath(key: string): boolean {
-	return key.startsWith(RESERVED_WEBDAV_PREFIX);
+export function isReservedWebdavPath(key: string, sidecarConfig: SidecarConfig = DEFAULT_SIDECAR_CONFIG): boolean {
+	let sidecarPrefix = getSidecarPrefix(sidecarConfig);
+	return key === sidecarPrefix || key.startsWith(`${sidecarPrefix}/`);
 }
 
-export function isDirectorySidecarKey(key: string): boolean {
-	return key.startsWith(`${DIRECTORY_SIDECAR_PREFIX}/`) && key.endsWith(DIRECTORY_SIDECAR_SUFFIX);
+export function isDirectorySidecarKey(key: string, sidecarConfig: SidecarConfig = DEFAULT_SIDECAR_CONFIG): boolean {
+	let sidecarPrefix = getSidecarPrefix(sidecarConfig);
+	return key.startsWith(`${sidecarPrefix}/`) && key.endsWith(DIRECTORY_SIDECAR_SUFFIX);
 }
 
 export function parseDirectorySidecar(payload: string): DirectorySidecar | undefined {

@@ -9,7 +9,8 @@ import {
 import { isCollectionObject, makeResourcePath } from '../../domain/path';
 import { hasCollectionResourceOrImplicit, rewriteStoredObject } from '../../domain/storage';
 import { DEAD_PROPERTY_PREFIX } from '../../shared/constants';
-import type { DeadProperty, DirectorySidecar } from '../../shared/types';
+import { DEFAULT_SIDECAR_CONFIG } from '../../shared/sidecar';
+import type { DeadProperty, DirectorySidecar, SidecarConfig } from '../../shared/types';
 import { getDeadPropertyKey, parseProppatchRequest } from '../xml';
 import { createTextResponse, xmlResponse } from '../responses';
 import { appendPropstatProperties, isProtectedProperty, renderProppatchResponse } from './property-shared';
@@ -17,8 +18,9 @@ import { appendPropstatProperties, isProtectedProperty, renderProppatchResponse 
 async function readDirectorySidecar(
 	bucket: R2Bucket,
 	resourcePath: string,
+	sidecarConfig: SidecarConfig,
 ): Promise<{ exists: boolean; sidecar: DirectorySidecar | undefined }> {
-	let sidecarObject = await bucket.get(getDirectorySidecarKey(resourcePath));
+	let sidecarObject = await bucket.get(getDirectorySidecarKey(resourcePath, sidecarConfig));
 	if (sidecarObject === null) {
 		return { exists: false, sidecar: undefined };
 	}
@@ -36,16 +38,20 @@ function stripDirectoryMetadata(customMetadata: Record<string, string> | undefin
 	return metadata;
 }
 
-export async function handleProppatch(request: Request, bucket: R2Bucket): Promise<Response> {
+export async function handleProppatch(
+	request: Request,
+	bucket: R2Bucket,
+	sidecarConfig: SidecarConfig = DEFAULT_SIDECAR_CONFIG,
+): Promise<Response> {
 	let resourcePath = makeResourcePath(request);
-	let lockResponse = await assertLockPermission(request, bucket, resourcePath);
+	let lockResponse = await assertLockPermission(request, bucket, resourcePath, sidecarConfig);
 	if (lockResponse !== null) {
 		return lockResponse;
 	}
 
 	let [object, sidecarResult] = await Promise.all([
 		bucket.head(resourcePath),
-		readDirectorySidecar(bucket, resourcePath),
+		readDirectorySidecar(bucket, resourcePath, sidecarConfig),
 	]);
 
 	let parsedRequest = parseProppatchRequest(await request.text());
@@ -60,7 +66,7 @@ export async function handleProppatch(request: Request, bucket: R2Bucket): Promi
 		((object !== null && isCollectionObject(object)) ||
 			(object === null &&
 				isCollectionRequest &&
-				(sidecarResult.exists || (await hasCollectionResourceOrImplicit(bucket, resourcePath)))));
+				(sidecarResult.exists || (await hasCollectionResourceOrImplicit(bucket, resourcePath, sidecarConfig)))));
 	if (!isDirectory && object === null) {
 		return createTextResponse('notFound');
 	}
@@ -127,7 +133,7 @@ export async function handleProppatch(request: Request, bucket: R2Bucket): Promi
 			if (baseLocks !== undefined && baseLocks.length > 0) {
 				nextSidecar.locks = baseLocks;
 			}
-			await bucket.put(getDirectorySidecarKey(resourcePath), serializeDirectorySidecar(nextSidecar));
+			await bucket.put(getDirectorySidecarKey(resourcePath, sidecarConfig), serializeDirectorySidecar(nextSidecar));
 
 			if (object !== null && isCollectionObject(object)) {
 				let updatedMetadata = stripDirectoryMetadata(object.customMetadata);

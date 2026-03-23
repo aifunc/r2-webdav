@@ -6,7 +6,7 @@
 
 ## Build, Test, and Development Commands
 
-使用 `npm ci` 安装依赖。使用 `npm run dev` 或 `npm start` 启动本地 Worker；脚本会自动设置项目级 `XDG_CONFIG_HOME` 并绑定 `0.0.0.0`，适合 Docker 环境。使用 `npm run check` 运行 `tsc --noEmit` 和 Prettier 校验。使用 `npm run test:unit` 执行 Node 单测。若要迁移旧目录标记对象，先在目标 `[[r2_buckets]]` 上配置 `remote = true`，再运行 `node scripts/migrate-directory-sidecars.mjs --dry-run` 和正式迁移命令。需要集成验证时，先启动本地服务，再运行 `litmus -k http://127.0.0.1:8787/ <user> <pass>`。部署命令为 `npm run deploy`。
+使用 `npm ci` 安装依赖。使用 `npm run dev` 或 `npm start` 启动本地 Worker；脚本会自动设置项目级 `XDG_CONFIG_HOME` 并绑定 `0.0.0.0`，适合 Docker 环境。使用 `npm run check` 运行 `tsc --noEmit` 和 Prettier 校验。使用 `npm run test:unit` 执行 Node 单测。若要迁移旧目录标记对象，先在目标 `[[r2_buckets]]` 上配置 `remote = true`，并确认 `[vars].SIDECAR_PREFIX` 指向当前 sidecar 前缀，再运行 `node scripts/migrate-directory-sidecars.mjs --dry-run` 和正式迁移命令。需要集成验证时，先启动本地服务，再运行 `litmus -k http://127.0.0.1:8787/ <user> <pass>`。部署命令为 `npm run deploy`。
 
 ## Coding Style & Naming Conventions
 
@@ -22,4 +22,4 @@
 
 ## Security & Configuration Tips
 
-不要提交真实的 `USERNAME`、`PASSWORD`、`.dev.vars` 或 Cloudflare 凭据。修改 `wrangler.toml` 时，保持 `bucket` 绑定名称与代码中的 `Env.bucket` 一致。`.__webdav__/` 是内部保留前缀，业务逻辑和迁移脚本都不能把它当作用户可见资源处理。新增本地脚本或测试产物时，确认临时目录继续落在 `.tmp/`，不要把生成文件带入版本库。
+不要提交真实的 `USERNAME`、`PASSWORD`、`.dev.vars` 或 Cloudflare 凭据。修改 `wrangler.toml` 时，保持 `bucket` 绑定名称与代码中的 `Env.bucket` 一致。`SIDECAR_PREFIX` 指向的前缀是内部保留命名空间，业务逻辑和迁移脚本都不能把它当作用户可见资源处理。新增本地脚本或测试产物时，确认临时目录继续落在 `.tmp/`，不要把生成文件带入版本库。

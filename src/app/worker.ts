@@ -1,4 +1,5 @@
 import { isAuthorized } from '../domain/auth';
+import { resolveSidecarConfig } from '../shared/sidecar';
 import { CORS_ALLOW_HEADERS, CORS_EXPOSE_HEADERS, SUPPORT_METHODS } from '../shared/constants';
 import type { Env } from '../shared/types';
 import { dispatchHandler } from './dispatch';
@@ -17,7 +18,7 @@ export default {
 			});
 		}
 
-		let response = await dispatchHandler(request, env.bucket);
+		let response = await dispatchHandler(request, env.bucket, resolveSidecarConfig(env));
 		response.headers.set('Access-Control-Allow-Origin', request.headers.get('Origin') ?? '*');
 		for (const [name, value] of Object.entries({
 			'Access-Control-Allow-Methods': SUPPORT_METHODS.join(', '),

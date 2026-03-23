@@ -1,6 +1,8 @@
 import { getResourceHref, makeResourcePath } from '../../domain/path';
 import { listCollectionChildren, listCollectionDescendants, resolveResource } from '../../domain/storage';
+import { DEFAULT_SIDECAR_CONFIG } from '../../shared/sidecar';
 import type { DeadProperty, PropfindRequest } from '../../shared/types';
+import type { SidecarConfig } from '../../shared/types';
 import {
 	escapeXml,
 	fromR2Object,
@@ -92,11 +94,12 @@ async function listPropfindResponses(
 	resourcePath: string,
 	propfindRequest: PropfindRequest,
 	isRecursive: boolean,
+	sidecarConfig: SidecarConfig,
 ): Promise<string[]> {
 	let responses: string[] = [];
 	let iterator = isRecursive
-		? listCollectionDescendants(bucket, resourcePath)
-		: listCollectionChildren(bucket, resourcePath);
+		? listCollectionDescendants(bucket, resourcePath, sidecarConfig)
+		: listCollectionChildren(bucket, resourcePath, sidecarConfig);
 	for await (let entry of iterator) {
 		responses.push(generatePropfindResponse(entry, propfindRequest));
 	}
@@ -109,11 +112,12 @@ async function resolvePropfindDepthResponses(
 	resourcePath: string,
 	propfindRequest: PropfindRequest,
 	depth: string,
+	sidecarConfig: SidecarConfig,
 ): Promise<string[] | null> {
 	let depthHandlers: Record<string, () => Promise<string[]>> = {
 		'0': async () => [],
-		'1': async () => listPropfindResponses(bucket, resourcePath, propfindRequest, false),
-		infinity: async () => listPropfindResponses(bucket, resourcePath, propfindRequest, true),
+		'1': async () => listPropfindResponses(bucket, resourcePath, propfindRequest, false, sidecarConfig),
+		infinity: async () => listPropfindResponses(bucket, resourcePath, propfindRequest, true, sidecarConfig),
 	};
 	let depthHandler = depthHandlers[depth];
 	if (depthHandler === undefined) {
@@ -123,14 +127,18 @@ async function resolvePropfindDepthResponses(
 	return depthHandler();
 }
 
-export async function handlePropfind(request: Request, bucket: R2Bucket): Promise<Response> {
+export async function handlePropfind(
+	request: Request,
+	bucket: R2Bucket,
+	sidecarConfig: SidecarConfig = DEFAULT_SIDECAR_CONFIG,
+): Promise<Response> {
 	let resourcePath = makeResourcePath(request);
 	let propfindRequest = parsePropfindRequest(await request.text());
 	if (propfindRequest === null) {
 		return createTextResponse('badRequest');
 	}
 
-	let resolved = await resolveResource(bucket, resourcePath);
+	let resolved = await resolveResource(bucket, resourcePath, sidecarConfig);
 	if (resolved === null) {
 		return createTextResponse('notFound');
 	}
@@ -150,7 +158,13 @@ export async function handlePropfind(request: Request, bucket: R2Bucket): Promis
 
 	if (isCollection) {
 		let depth = request.headers.get('Depth') ?? 'infinity';
-		let depthResponses = await resolvePropfindDepthResponses(bucket, resourcePath, propfindRequest, depth);
+		let depthResponses = await resolvePropfindDepthResponses(
+			bucket,
+			resourcePath,
+			propfindRequest,
+			depth,
+			sidecarConfig,
+		);
 		if (depthResponses === null) {
 			return createTextResponse('badRequest');
 		}

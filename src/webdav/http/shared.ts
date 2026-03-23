@@ -1,5 +1,7 @@
 import { getParentPath } from '../../domain/path';
 import { hasCollectionResourceOrImplicit } from '../../domain/storage';
+import { DEFAULT_SIDECAR_CONFIG } from '../../shared/sidecar';
+import type { SidecarConfig } from '../../shared/types';
 
 type ResponseTemplateName =
 	| 'methodNotAllowed'
@@ -41,9 +43,13 @@ export function createTextResponse(templateName: ResponseTemplateName): Response
 	});
 }
 
-export async function ensureParentCollectionResource(bucket: R2Bucket, resourcePath: string): Promise<Response | null> {
+export async function ensureParentCollectionResource(
+	bucket: R2Bucket,
+	resourcePath: string,
+	sidecarConfig: SidecarConfig = DEFAULT_SIDECAR_CONFIG,
+): Promise<Response | null> {
 	let parentPath = getParentPath(resourcePath);
-	if (parentPath === '' || (await hasCollectionResourceOrImplicit(bucket, parentPath))) {
+	if (parentPath === '' || (await hasCollectionResourceOrImplicit(bucket, parentPath, sidecarConfig))) {
 		return null;
 	}
 

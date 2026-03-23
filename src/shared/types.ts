@@ -2,7 +2,12 @@ export interface Env {
 	bucket: R2Bucket;
 	USERNAME: string;
 	PASSWORD: string;
+	SIDECAR_PREFIX?: string;
 }
+
+export type SidecarConfig = {
+	sidecarPrefix: string;
+};
 
 export type DavProperties = {
 	creationdate: string | undefined;

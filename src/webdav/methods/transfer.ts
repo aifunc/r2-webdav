@@ -2,6 +2,8 @@ import { assertLockPermission, getPreservedCustomMetadata, stripLockMetadata } f
 import { stripDirectoryLocks } from '../../domain/directories';
 import { makeResourcePath } from '../../domain/path';
 import { resolveResource } from '../../domain/storage';
+import { DEFAULT_SIDECAR_CONFIG } from '../../shared/sidecar';
+import type { SidecarConfig } from '../../shared/types';
 import { handleDelete } from '../http/handlers';
 import {
 	buildForwardedDeleteHeaders,
@@ -17,32 +19,36 @@ import {
 	transferOrNotFound,
 } from '../responses';
 
-export async function handleCopy(request: Request, bucket: R2Bucket): Promise<Response> {
+export async function handleCopy(
+	request: Request,
+	bucket: R2Bucket,
+	sidecarConfig: SidecarConfig = DEFAULT_SIDECAR_CONFIG,
+): Promise<Response> {
 	let resourcePath = makeResourcePath(request);
 	let overwriteDisabled = request.headers.get('Overwrite') === 'F';
-	let destinationTarget = resolveDestinationTarget(request, resourcePath);
+	let destinationTarget = resolveDestinationTarget(request, resourcePath, sidecarConfig);
 	if (destinationTarget instanceof Response) {
 		return destinationTarget;
 	}
 	let destination = destinationTarget.path;
 
-	let lockResponse = await assertLockPermission(request, bucket, destination);
+	let lockResponse = await assertLockPermission(request, bucket, destination, sidecarConfig);
 	if (lockResponse !== null) {
 		return lockResponse;
 	}
 
-	let resource = await loadTransferResource(bucket, resourcePath, destination);
+	let resource = await loadTransferResource(bucket, resourcePath, destination, sidecarConfig);
 	if (resource instanceof Response) {
 		return resource;
 	}
 
-	let parentResponse = await ensureDestinationParentExists(bucket, destination);
+	let parentResponse = await ensureDestinationParentExists(bucket, destination, sidecarConfig);
 	if (parentResponse !== null) {
 		return parentResponse;
 	}
 
 	let destinationExists = resource.isCollection
-		? (await resolveResource(bucket, destination)) !== null
+		? (await resolveResource(bucket, destination, sidecarConfig)) !== null
 		: (await bucket.head(destination)) !== null;
 	if (overwriteDisabled && destinationExists) {
 		return createTextResponse('preconditionFailed');
@@ -56,6 +62,7 @@ export async function handleCopy(request: Request, bucket: R2Bucket): Promise<Re
 					resource.resourcePath,
 					destination,
 					(object) => stripLockMetadata(object.customMetadata),
+					sidecarConfig,
 					{ mapSidecar: stripDirectoryLocks },
 				);
 				return completeTransfer(transferResponse, destinationExists, destination, true);
@@ -69,6 +76,7 @@ export async function handleCopy(request: Request, bucket: R2Bucket): Promise<Re
 					resource.resourcePath,
 					destination,
 					(object) => stripLockMetadata(object.customMetadata),
+					sidecarConfig,
 					{ includeDescendants: false, mapSidecar: stripDirectoryLocks },
 				);
 				return completeTransfer(copyResponse, destinationExists, destination, true);
@@ -93,36 +101,46 @@ export async function handleCopy(request: Request, bucket: R2Bucket): Promise<Re
 	return transferCompletedResponse(destinationExists, destination, false);
 }
 
-export async function handleMove(request: Request, bucket: R2Bucket): Promise<Response> {
+export async function handleMove(
+	request: Request,
+	bucket: R2Bucket,
+	sidecarConfig: SidecarConfig = DEFAULT_SIDECAR_CONFIG,
+): Promise<Response> {
 	let resourcePath = makeResourcePath(request);
 	let overwrite = (request.headers.get('Overwrite') ?? 'T') !== 'F';
-	let destinationTarget = resolveDestinationTarget(request, resourcePath);
+	let destinationTarget = resolveDestinationTarget(request, resourcePath, sidecarConfig);
 	if (destinationTarget instanceof Response) {
 		return destinationTarget;
 	}
 	let destination = destinationTarget.path;
 
-	let sourceLockResponse = await assertLockPermission(request, bucket, resourcePath);
+	let sourceLockResponse = await assertLockPermission(request, bucket, resourcePath, sidecarConfig);
 	if (sourceLockResponse !== null) {
 		return sourceLockResponse;
 	}
-	let destinationLockResponse = await assertLockPermission(request, bucket, destination);
+	let destinationLockResponse = await assertLockPermission(request, bucket, destination, sidecarConfig);
 	if (destinationLockResponse !== null) {
 		return destinationLockResponse;
 	}
 
-	let resource = await loadTransferResource(bucket, resourcePath, destination, moveDestinationValidation);
+	let resource = await loadTransferResource(
+		bucket,
+		resourcePath,
+		destination,
+		sidecarConfig,
+		moveDestinationValidation,
+	);
 	if (resource instanceof Response) {
 		return resource;
 	}
 
-	let parentResponse = await ensureDestinationParentExists(bucket, destination);
+	let parentResponse = await ensureDestinationParentExists(bucket, destination, sidecarConfig);
 	if (parentResponse !== null) {
 		return parentResponse;
 	}
 
 	let destinationExists = resource.isCollection
-		? (await resolveResource(bucket, destination)) !== null
+		? (await resolveResource(bucket, destination, sidecarConfig)) !== null
 		: (await bucket.head(destination)) !== null;
 	if (!overwrite && destinationExists) {
 		return createTextResponse('preconditionFailed');
@@ -135,6 +153,7 @@ export async function handleMove(request: Request, bucket: R2Bucket): Promise<Re
 				headers: buildForwardedDeleteHeaders(request),
 			}),
 			bucket,
+			sidecarConfig,
 		);
 		if (!deleteResponse.ok) {
 			return deleteResponse;
@@ -149,6 +168,7 @@ export async function handleMove(request: Request, bucket: R2Bucket): Promise<Re
 					resource.resourcePath,
 					destination,
 					(object) => getPreservedCustomMetadata(object.customMetadata),
+					sidecarConfig,
 					{ deleteSource: true },
 				);
 				return completeTransfer(transferResponse, destinationExists, destination, true);

@@ -17,7 +17,8 @@ import {
 } from '../../domain/locks';
 import { getParentPath, getResourceHref, isCollectionObject, makeResourcePath } from '../../domain/path';
 import { hasCollectionResourceOrImplicit, rewriteStoredObject } from '../../domain/storage';
-import type { DirectorySidecar, LockDetails } from '../../shared/types';
+import { DEFAULT_SIDECAR_CONFIG } from '../../shared/sidecar';
+import type { DirectorySidecar, LockDetails, SidecarConfig } from '../../shared/types';
 import {
 	getDirectorySidecarKey,
 	legacyMarkerToSidecar,
@@ -50,7 +51,11 @@ function stripDirectoryMetadata(customMetadata: Record<string, string> | undefin
 	return metadata;
 }
 
-export async function handleLock(request: Request, bucket: R2Bucket): Promise<Response> {
+export async function handleLock(
+	request: Request,
+	bucket: R2Bucket,
+	sidecarConfig: SidecarConfig = DEFAULT_SIDECAR_CONFIG,
+): Promise<Response> {
 	let resourcePath = makeResourcePath(request);
 	let depthHeader = request.headers.get('Depth');
 	if (depthHeader !== null && !VALID_LOCK_DEPTHS.includes(depthHeader as (typeof VALID_LOCK_DEPTHS)[number])) {
@@ -67,15 +72,15 @@ export async function handleLock(request: Request, bucket: R2Bucket): Promise<Re
 	}
 
 	let owner = extractLockOwner(body);
-	let lockResponse = await assertLockPermission(request, bucket, resourcePath, {
+	let lockResponse = await assertLockPermission(request, bucket, resourcePath, sidecarConfig, {
 		ignoreSharedLocksOnTarget: body !== '' && requestedScope === 'shared',
 	});
 	if (lockResponse !== null) {
 		return lockResponse;
 	}
 
-	let refreshTarget = isRefreshRequest ? await findMatchingLock(request, bucket, resourcePath) : null;
-	let lockState = await readLockState(bucket, resourcePath);
+	let refreshTarget = isRefreshRequest ? await findMatchingLock(request, bucket, resourcePath, sidecarConfig) : null;
+	let lockState = await readLockState(bucket, resourcePath, sidecarConfig);
 	let resource = lockState.resource;
 	let existingLock = refreshTarget?.lockDetails;
 	let sidecarKey = lockState.sidecarKey;
@@ -101,7 +106,7 @@ export async function handleLock(request: Request, bucket: R2Bucket): Promise<Re
 		((resource !== null && isCollectionObject(resource)) ||
 			(resource === null &&
 				isCollectionRequest &&
-				(sidecarExists || (await hasCollectionResourceOrImplicit(bucket, resourcePath)))));
+				(sidecarExists || (await hasCollectionResourceOrImplicit(bucket, resourcePath, sidecarConfig)))));
 	if (
 		refreshTarget === null &&
 		isRefreshRequest &&
@@ -119,7 +124,7 @@ export async function handleLock(request: Request, bucket: R2Bucket): Promise<Re
 			}
 		} else {
 			let parentPath = getParentPath(resourcePath);
-			let parentExists = await hasCollectionResourceOrImplicit(bucket, parentPath);
+			let parentExists = await hasCollectionResourceOrImplicit(bucket, parentPath, sidecarConfig);
 			if (!parentExists) {
 				return createTextResponse('conflict');
 			}
@@ -146,7 +151,7 @@ export async function handleLock(request: Request, bucket: R2Bucket): Promise<Re
 	if (isDirectoryTarget && !sidecarExists) {
 		let legacy = resource ? readLegacyDirectoryMarker(resource.customMetadata) : undefined;
 		baseSidecar = legacy ? legacyMarkerToSidecar(legacy) : { kind: 'directory' };
-		sidecarKey = getDirectorySidecarKey(resourcePath);
+		sidecarKey = getDirectorySidecarKey(resourcePath, sidecarConfig);
 		sidecarLocks = baseSidecar.locks ?? [];
 		sidecarExists = true;
 		currentLocks = sidecarLocks;
@@ -234,9 +239,13 @@ export async function handleLock(request: Request, bucket: R2Bucket): Promise<Re
 	);
 }
 
-export async function handleUnlock(request: Request, bucket: R2Bucket): Promise<Response> {
+export async function handleUnlock(
+	request: Request,
+	bucket: R2Bucket,
+	sidecarConfig: SidecarConfig = DEFAULT_SIDECAR_CONFIG,
+): Promise<Response> {
 	let resourcePath = makeResourcePath(request);
-	let lockState = await readLockState(bucket, resourcePath);
+	let lockState = await readLockState(bucket, resourcePath, sidecarConfig);
 	let resource = lockState.resource;
 	let sidecarKey = lockState.sidecarKey;
 	let sidecarExists = lockState.sidecarExists;
@@ -244,7 +253,7 @@ export async function handleUnlock(request: Request, bucket: R2Bucket): Promise<
 	let isDirectoryTarget =
 		sidecarExists ||
 		isCollectionObject(resource) ||
-		(resource === null && (await hasCollectionResourceOrImplicit(bucket, resourcePath)));
+		(resource === null && (await hasCollectionResourceOrImplicit(bucket, resourcePath, sidecarConfig)));
 	if (resource === null && !isDirectoryTarget) {
 		return createTextResponse('notFound');
 	}
@@ -254,7 +263,7 @@ export async function handleUnlock(request: Request, bucket: R2Bucket): Promise<
 		return createTextResponse('badRequest');
 	}
 
-	let lockResponse = await assertLockPermission(request, bucket, resourcePath);
+	let lockResponse = await assertLockPermission(request, bucket, resourcePath, sidecarConfig);
 	if (lockResponse !== null) {
 		return lockResponse;
 	}
@@ -269,7 +278,7 @@ export async function handleUnlock(request: Request, bucket: R2Bucket): Promise<
 	if (isDirectoryTarget && !sidecarExists) {
 		let legacy = resource ? readLegacyDirectoryMarker(resource.customMetadata) : undefined;
 		baseSidecar = legacy ? legacyMarkerToSidecar(legacy) : { kind: 'directory' };
-		sidecarKey = getDirectorySidecarKey(resourcePath);
+		sidecarKey = getDirectorySidecarKey(resourcePath, sidecarConfig);
 		sidecarLocks = baseSidecar.locks ?? [];
 		sidecarExists = true;
 		lockDetails = sidecarLocks;

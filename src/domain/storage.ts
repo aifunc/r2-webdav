@@ -1,6 +1,9 @@
-import { DEAD_PROPERTY_PREFIX, DIRECTORY_SIDECAR_PREFIX } from '../shared/constants';
+import { DEAD_PROPERTY_PREFIX } from '../shared/constants';
+import { DEFAULT_SIDECAR_CONFIG, getSidecarPrefix } from '../shared/sidecar';
 import {
 	coalesceDirectoryMetadata,
+	getDirectorySidecarKey,
+	isDirectorySidecarKey,
 	legacyMarkerToSidecar,
 	parseDirectorySidecar,
 	readLegacyDirectoryMarker,
@@ -15,26 +18,19 @@ import {
 	joinResourcePath,
 	trimTrailingSlash,
 } from './path';
-import type { DirectorySidecar } from '../shared/types';
+import type { DirectorySidecar, SidecarConfig } from '../shared/types';
 
 const DIRECTORY_SIDECAR_SUFFIX = '.json';
-const DIRECTORY_SIDECAR_ROOT = `${DIRECTORY_SIDECAR_PREFIX}/`;
-
-function getDirectorySidecarKey(resourcePath: string): string {
-	let normalized = resourcePath.replace(/^\/+|\/+$/g, '');
-	let base = normalized === '' ? DIRECTORY_SIDECAR_ROOT : `${DIRECTORY_SIDECAR_ROOT}${normalized}`;
-	return `${base}${DIRECTORY_SIDECAR_SUFFIX}`;
-}
-
-function isDirectorySidecarKey(key: string): boolean {
-	return key.startsWith(DIRECTORY_SIDECAR_ROOT) && key.endsWith(DIRECTORY_SIDECAR_SUFFIX);
-}
 
 export type ListedResource = {
 	key: string;
 	object: R2Object | null;
 	isCollection: boolean;
 };
+
+function getDirectorySidecarRoot(sidecarConfig: SidecarConfig): string {
+	return `${getSidecarPrefix(sidecarConfig)}/`;
+}
 
 function addListedResource(entries: Map<string, ListedResource>, entry: ListedResource): void {
 	let existing = entries.get(entry.key);
@@ -50,11 +46,12 @@ function addListedResource(entries: Map<string, ListedResource>, entry: ListedRe
 	}
 }
 
-function parseDirectorySidecarPath(key: string): string | null {
-	if (!isDirectorySidecarKey(key) || !key.startsWith(DIRECTORY_SIDECAR_ROOT)) {
+function parseDirectorySidecarPath(key: string, sidecarConfig: SidecarConfig): string | null {
+	let directorySidecarRoot = getDirectorySidecarRoot(sidecarConfig);
+	if (!isDirectorySidecarKey(key, sidecarConfig) || !key.startsWith(directorySidecarRoot)) {
 		return null;
 	}
-	return key.slice(DIRECTORY_SIDECAR_ROOT.length, -DIRECTORY_SIDECAR_SUFFIX.length);
+	return key.slice(directorySidecarRoot.length, -DIRECTORY_SIDECAR_SUFFIX.length);
 }
 
 function isDirectChildPath(parentPath: string, childPath: string): boolean {
@@ -71,8 +68,10 @@ function isDirectChildPath(parentPath: string, childPath: string): boolean {
 async function* listDirectorySidecarChildren(
 	bucket: R2Bucket,
 	resourcePath: string,
+	sidecarConfig: SidecarConfig,
 ): AsyncGenerator<{ resourcePath: string; sidecarKey: string }> {
-	let prefix = resourcePath === '' ? DIRECTORY_SIDECAR_ROOT : `${DIRECTORY_SIDECAR_ROOT}${resourcePath}/`;
+	let directorySidecarRoot = getDirectorySidecarRoot(sidecarConfig);
+	let prefix = resourcePath === '' ? directorySidecarRoot : `${directorySidecarRoot}${resourcePath}/`;
 	let cursor: string | undefined = undefined;
 	do {
 		let r2Objects = await bucket.list({
@@ -82,7 +81,7 @@ async function* listDirectorySidecarChildren(
 		});
 
 		for (let object of r2Objects.objects) {
-			let sidecarPath = parseDirectorySidecarPath(object.key);
+			let sidecarPath = parseDirectorySidecarPath(object.key, sidecarConfig);
 			if (sidecarPath === null || !isDirectChildPath(resourcePath, sidecarPath)) {
 				continue;
 			}
@@ -95,20 +94,29 @@ async function* listDirectorySidecarChildren(
 	} while (cursor !== undefined);
 }
 
-async function hasNonInternalDescendants(bucket: R2Bucket, resourcePath: string): Promise<boolean> {
+async function hasNonInternalDescendants(
+	bucket: R2Bucket,
+	resourcePath: string,
+	sidecarConfig: SidecarConfig,
+): Promise<boolean> {
 	let prefix = getCollectionPrefix(resourcePath);
 	for await (let object of listAll(bucket, prefix, true)) {
-		if (!isReservedWebdavNamespace(object.key)) {
+		if (!isReservedWebdavNamespace(object.key, sidecarConfig)) {
 			return true;
 		}
 	}
 	return false;
 }
 
-async function hasSidecarDescendants(bucket: R2Bucket, resourcePath: string): Promise<boolean> {
-	let prefix = resourcePath === '' ? DIRECTORY_SIDECAR_ROOT : `${DIRECTORY_SIDECAR_ROOT}${resourcePath}/`;
+async function hasSidecarDescendants(
+	bucket: R2Bucket,
+	resourcePath: string,
+	sidecarConfig: SidecarConfig,
+): Promise<boolean> {
+	let directorySidecarRoot = getDirectorySidecarRoot(sidecarConfig);
+	let prefix = resourcePath === '' ? directorySidecarRoot : `${directorySidecarRoot}${resourcePath}/`;
 	for await (let object of listAll(bucket, prefix, true)) {
-		if (isDirectorySidecarKey(object.key)) {
+		if (isDirectorySidecarKey(object.key, sidecarConfig)) {
 			return true;
 		}
 	}
@@ -127,8 +135,9 @@ async function readSidecarFromKey(bucket: R2Bucket, sidecarKey: string): Promise
 async function readDirectorySidecar(
 	bucket: R2Bucket,
 	resourcePath: string,
+	sidecarConfig: SidecarConfig,
 ): Promise<{ exists: boolean; sidecar: DirectorySidecar | undefined }> {
-	let sidecarKey = getDirectorySidecarKey(resourcePath);
+	let sidecarKey = getDirectorySidecarKey(resourcePath, sidecarConfig);
 	let object = await bucket.get(sidecarKey);
 	if (object === null) {
 		return { exists: false, sidecar: undefined };
@@ -140,10 +149,12 @@ async function readDirectorySidecar(
 async function* listDirectorySidecarEntries(
 	bucket: R2Bucket,
 	resourcePath: string,
+	sidecarConfig: SidecarConfig,
 ): AsyncGenerator<{ resourcePath: string; sidecarKey: string }> {
-	let prefix = resourcePath === '' ? DIRECTORY_SIDECAR_ROOT : `${DIRECTORY_SIDECAR_ROOT}${resourcePath}`;
+	let directorySidecarRoot = getDirectorySidecarRoot(sidecarConfig);
+	let prefix = resourcePath === '' ? directorySidecarRoot : `${directorySidecarRoot}${resourcePath}`;
 	for await (let object of listAll(bucket, prefix, true)) {
-		let sidecarPath = parseDirectorySidecarPath(object.key);
+		let sidecarPath = parseDirectorySidecarPath(object.key, sidecarConfig);
 		if (sidecarPath === null || !isSameOrDescendantPath(resourcePath, sidecarPath)) {
 			continue;
 		}
@@ -161,8 +172,13 @@ function getTransferTargetDirectoryPath(sourcePath: string, destination: string,
 	return joinResourcePath(destination, entryPath.slice(sourcePath.length + 1));
 }
 
-async function writeDirectorySidecar(bucket: R2Bucket, resourcePath: string, sidecar: DirectorySidecar): Promise<void> {
-	await bucket.put(getDirectorySidecarKey(resourcePath), serializeDirectorySidecar(sidecar));
+async function writeDirectorySidecar(
+	bucket: R2Bucket,
+	resourcePath: string,
+	sidecar: DirectorySidecar,
+	sidecarConfig: SidecarConfig,
+): Promise<void> {
+	await bucket.put(getDirectorySidecarKey(resourcePath, sidecarConfig), serializeDirectorySidecar(sidecar));
 }
 
 function stripDeadProperties(metadata: Record<string, string>): Record<string, string> {
@@ -210,8 +226,12 @@ function createVirtualDirectoryObject(key: string, customMetadata: Record<string
 	} as R2Object;
 }
 
-async function resolveVirtualCollection(bucket: R2Bucket, resourcePath: string): Promise<R2Object | null> {
-	let sidecarResult = await readDirectorySidecar(bucket, resourcePath);
+async function resolveVirtualCollection(
+	bucket: R2Bucket,
+	resourcePath: string,
+	sidecarConfig: SidecarConfig,
+): Promise<R2Object | null> {
+	let sidecarResult = await readDirectorySidecar(bucket, resourcePath, sidecarConfig);
 	if (sidecarResult.exists) {
 		let directoryMetadata = mergeDirectoryMetadata(undefined, sidecarResult.sidecar ?? { kind: 'directory' });
 		if (directoryMetadata !== undefined) {
@@ -244,7 +264,11 @@ export async function* listAll(bucket: R2Bucket, prefix: string, isRecursive: bo
 	} while (cursor !== undefined);
 }
 
-export async function* listCollectionChildren(bucket: R2Bucket, resourcePath: string): AsyncGenerator<ListedResource> {
+export async function* listCollectionChildren(
+	bucket: R2Bucket,
+	resourcePath: string,
+	sidecarConfig: SidecarConfig = DEFAULT_SIDECAR_CONFIG,
+): AsyncGenerator<ListedResource> {
 	let entries = new Map<string, ListedResource>();
 	let prefix = getCollectionPrefix(resourcePath);
 	let cursor: string | undefined = undefined;
@@ -258,7 +282,7 @@ export async function* listCollectionChildren(bucket: R2Bucket, resourcePath: st
 		});
 
 		for (let object of r2Objects.objects) {
-			if (isReservedWebdavNamespace(object.key)) {
+			if (isReservedWebdavNamespace(object.key, sidecarConfig)) {
 				continue;
 			}
 			addListedResource(entries, { key: object.key, object, isCollection: isCollectionObject(object) });
@@ -266,7 +290,7 @@ export async function* listCollectionChildren(bucket: R2Bucket, resourcePath: st
 
 		for (let childPrefix of r2Objects.delimitedPrefixes ?? []) {
 			let childPath = trimTrailingSlash(childPrefix);
-			if (childPath === '' || isReservedWebdavNamespace(childPath)) {
+			if (childPath === '' || isReservedWebdavNamespace(childPath, sidecarConfig)) {
 				continue;
 			}
 			addListedResource(entries, { key: childPath, object: null, isCollection: true });
@@ -277,8 +301,8 @@ export async function* listCollectionChildren(bucket: R2Bucket, resourcePath: st
 		}
 	} while (cursor !== undefined);
 
-	for await (let sidecarEntry of listDirectorySidecarChildren(bucket, resourcePath)) {
-		if (isReservedWebdavNamespace(sidecarEntry.resourcePath)) {
+	for await (let sidecarEntry of listDirectorySidecarChildren(bucket, resourcePath, sidecarConfig)) {
+		if (isReservedWebdavNamespace(sidecarEntry.resourcePath, sidecarConfig)) {
 			continue;
 		}
 		let sidecarObject = await bucket.get(sidecarEntry.sidecarKey);
@@ -310,6 +334,7 @@ export async function* listCollectionChildren(bucket: R2Bucket, resourcePath: st
 export async function* listCollectionDescendants(
 	bucket: R2Bucket,
 	resourcePath: string,
+	sidecarConfig: SidecarConfig = DEFAULT_SIDECAR_CONFIG,
 ): AsyncGenerator<ListedResource> {
 	let queue = [resourcePath];
 	let seen = new Set<string>();
@@ -319,7 +344,7 @@ export async function* listCollectionDescendants(
 		if (current === undefined) {
 			continue;
 		}
-		for await (let entry of listCollectionChildren(bucket, current)) {
+		for await (let entry of listCollectionChildren(bucket, current, sidecarConfig)) {
 			if (seen.has(entry.key)) {
 				continue;
 			}
@@ -335,6 +360,7 @@ export async function* listCollectionDescendants(
 export async function resolveResource(
 	bucket: R2Bucket,
 	resourcePath: string,
+	sidecarConfig: SidecarConfig = DEFAULT_SIDECAR_CONFIG,
 ): Promise<{ object: R2Object | null; isCollection: boolean } | null> {
 	if (resourcePath === '') {
 		return { object: null, isCollection: true };
@@ -346,7 +372,7 @@ export async function resolveResource(
 			return { object: resource, isCollection: false };
 		}
 
-		let sidecarResult = await readDirectorySidecar(bucket, resourcePath);
+		let sidecarResult = await readDirectorySidecar(bucket, resourcePath, sidecarConfig);
 		if (!sidecarResult.exists) {
 			return { object: resource, isCollection: true };
 		}
@@ -357,14 +383,14 @@ export async function resolveResource(
 		return { object, isCollection: true };
 	}
 
-	let virtual = await resolveVirtualCollection(bucket, resourcePath);
+	let virtual = await resolveVirtualCollection(bucket, resourcePath, sidecarConfig);
 	if (virtual !== null) {
 		return { object: virtual, isCollection: true };
 	}
-	if (await hasNonInternalDescendants(bucket, resourcePath)) {
+	if (await hasNonInternalDescendants(bucket, resourcePath, sidecarConfig)) {
 		return { object: null, isCollection: true };
 	}
-	if (await hasSidecarDescendants(bucket, resourcePath)) {
+	if (await hasSidecarDescendants(bucket, resourcePath, sidecarConfig)) {
 		return { object: null, isCollection: true };
 	}
 
@@ -380,8 +406,12 @@ export async function hasCollectionResource(bucket: R2Bucket, resourcePath: stri
 	return isCollectionObject(resource);
 }
 
-export async function hasCollectionResourceOrImplicit(bucket: R2Bucket, resourcePath: string): Promise<boolean> {
-	let resolved = await resolveResource(bucket, resourcePath);
+export async function hasCollectionResourceOrImplicit(
+	bucket: R2Bucket,
+	resourcePath: string,
+	sidecarConfig: SidecarConfig = DEFAULT_SIDECAR_CONFIG,
+): Promise<boolean> {
+	let resolved = await resolveResource(bucket, resourcePath, sidecarConfig);
 	return resolved?.isCollection ?? false;
 }
 
@@ -419,6 +449,7 @@ export async function transferDirectoryResources(
 	sourcePath: string,
 	destination: string,
 	mapMetadata: (object: R2Object) => Record<string, string>,
+	sidecarConfig: SidecarConfig = DEFAULT_SIDECAR_CONFIG,
 	options: DirectoryTransferOptions = {},
 ): Promise<boolean> {
 	let includeDescendants = options.includeDescendants ?? true;
@@ -426,7 +457,7 @@ export async function transferDirectoryResources(
 	let mapSidecar = options.mapSidecar ?? ((sidecar: DirectorySidecar) => sidecar);
 
 	let sidecarEntries: { resourcePath: string; sidecarKey: string }[] = [];
-	for await (let entry of listDirectorySidecarEntries(bucket, sourcePath)) {
+	for await (let entry of listDirectorySidecarEntries(bucket, sourcePath, sidecarConfig)) {
 		sidecarEntries.push(entry);
 	}
 	if (!includeDescendants) {
@@ -485,7 +516,10 @@ export async function transferDirectoryResources(
 		transferDirectorySidecar(
 			bucket,
 			entry.sidecarKey,
-			getDirectorySidecarKey(getTransferTargetDirectoryPath(sourcePath, destination, entry.resourcePath)),
+			getDirectorySidecarKey(
+				getTransferTargetDirectoryPath(sourcePath, destination, entry.resourcePath),
+				sidecarConfig,
+			),
 			mapSidecar,
 			deleteSource,
 		),
@@ -495,7 +529,7 @@ export async function transferDirectoryResources(
 		.filter((entry) => !sidecarPaths.has(entry.resourcePath))
 		.map(async (entry) => {
 			let targetPath = getTransferTargetDirectoryPath(sourcePath, destination, entry.resourcePath);
-			await writeDirectorySidecar(bucket, targetPath, mapSidecar(entry.sidecar));
+			await writeDirectorySidecar(bucket, targetPath, mapSidecar(entry.sidecar), sidecarConfig);
 			return true;
 		});
 
@@ -511,9 +545,13 @@ export async function transferDirectoryResources(
 	return true;
 }
 
-export async function deleteDirectorySidecars(bucket: R2Bucket, resourcePath: string): Promise<void> {
+export async function deleteDirectorySidecars(
+	bucket: R2Bucket,
+	resourcePath: string,
+	sidecarConfig: SidecarConfig = DEFAULT_SIDECAR_CONFIG,
+): Promise<void> {
 	let keys: string[] = [];
-	for await (let entry of listDirectorySidecarEntries(bucket, resourcePath)) {
+	for await (let entry of listDirectorySidecarEntries(bucket, resourcePath, sidecarConfig)) {
 		keys.push(entry.sidecarKey);
 	}
 	if (keys.length > 0) {

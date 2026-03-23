@@ -56,18 +56,28 @@ const CUSTOM_DEAD_PROPERTY = {
 };
 
 test('generates directory sidecar key for resource paths', () => {
-	assert.equal(getDirectorySidecarKey('docs/collections'), '.__webdav__/directories/docs/collections.json');
-	assert.equal(getDirectorySidecarKey(''), '.__webdav__/directories/.json');
+	assert.equal(getDirectorySidecarKey('docs/collections'), '.__sidecar__/docs/collections.json');
+	assert.equal(getDirectorySidecarKey(''), '.__sidecar__/.json');
 });
 
-test('detects sidecar object keys under __webdav__/directories', () => {
-	assert.equal(isDirectorySidecarKey('.__webdav__/directories/docs.json'), true);
-	assert.equal(isDirectorySidecarKey('docs/__webdav__/directories.json'), false);
+test('generates directory sidecar key for a custom configured prefix', () => {
+	assert.equal(
+		getDirectorySidecarKey('docs/collections', { sidecarPrefix: '.__meta__' }),
+		'.__meta__/docs/collections.json',
+	);
+	assert.equal(getDirectorySidecarKey('', { sidecarPrefix: '.__meta__' }), '.__meta__/.json');
 });
 
-test('detects reserved __webdav__ namespace paths', () => {
-	assert.equal(isReservedWebdavPath('.__webdav__/directories/docs.json'), true);
-	assert.equal(isReservedWebdavPath('docs/.__webdav__/directories.json'), false);
+test('detects sidecar object keys under the configured prefix', () => {
+	assert.equal(isDirectorySidecarKey('.__sidecar__/docs.json'), true);
+	assert.equal(isDirectorySidecarKey('docs/.__sidecar__.json'), false);
+	assert.equal(isDirectorySidecarKey('.__meta__/docs.json', { sidecarPrefix: '.__meta__' }), true);
+});
+
+test('detects reserved sidecar namespace paths', () => {
+	assert.equal(isReservedWebdavPath('.__sidecar__/docs.json'), true);
+	assert.equal(isReservedWebdavPath('docs/.__sidecar__/meta.json'), false);
+	assert.equal(isReservedWebdavPath('.__meta__/docs.json', { sidecarPrefix: '.__meta__' }), true);
 });
 
 const SIDE_CAR_PROPS = { [DEAD_PROPERTY_KEY]: DISPLAYNAME_PROPERTY };
@@ -216,8 +226,10 @@ test('migration plan reports a conflict when the existing sidecar differs from l
 	});
 });
 
-const RESERVED_URL = 'http://example.com/.__webdav__/sidecar';
-const RESERVED_ROOT_URL = 'http://example.com/.__webdav__';
+const RESERVED_URL = 'http://example.com/.__sidecar__/sidecar';
+const RESERVED_ROOT_URL = 'http://example.com/.__sidecar__';
+const CUSTOM_RESERVED_URL = 'http://example.com/.__meta__/sidecar';
+const CUSTOM_RESERVED_ROOT_URL = 'http://example.com/.__meta__';
 const VALID_DESTINATION_URL = 'http://example.com/not-reserved';
 const BAD_REQUEST_BODY = 'Bad Request';
 
@@ -445,11 +457,23 @@ test('GET request root path rejects reserved namespace', async () => {
 	await assertBadRequestResponse(response);
 });
 
+test('GET request path rejects a custom configured reserved namespace', async () => {
+	const request = new Request(CUSTOM_RESERVED_URL, { method: 'GET' });
+	const response = await dispatchHandler(request, createDummyBucket(), { sidecarPrefix: '.__meta__' });
+	await assertBadRequestResponse(response);
+});
+
+test('GET request root path rejects a custom configured reserved namespace', async () => {
+	const request = new Request(CUSTOM_RESERVED_ROOT_URL, { method: 'GET' });
+	const response = await dispatchHandler(request, createDummyBucket(), { sidecarPrefix: '.__meta__' });
+	await assertBadRequestResponse(response);
+});
+
 test('COPY rejects reserved destination paths before bucket work', async () => {
 	const request = new Request('http://example.com/allowed', {
 		method: 'COPY',
 		headers: {
-			Destination: 'http://example.com/.__webdav__/internal',
+			Destination: 'http://example.com/.__sidecar__/internal',
 		},
 	});
 	const response = await handleCopy(request, createFailingBucket());
@@ -460,7 +484,7 @@ test('MOVE rejects reserved destination paths before bucket work', async () => {
 	const request = new Request('http://example.com/allowed', {
 		method: 'MOVE',
 		headers: {
-			Destination: 'http://example.com/.__webdav__/internal',
+			Destination: 'http://example.com/.__sidecar__/internal',
 		},
 	});
 	const response = await handleMove(request, createFailingBucket());
@@ -494,7 +518,7 @@ test('PUT does not treat sidecar-only parent as a collection', async () => {
 	const bucket = {
 		operations,
 		async head(key) {
-			if (key === '.__webdav__/directories/parent.json') {
+			if (key === '.__sidecar__/parent.json') {
 				return createObject(key);
 			}
 			return null;
@@ -550,7 +574,7 @@ test('GET resolves implicit directories from child prefixes', async () => {
 });
 
 test('GET root listing includes sidecar-backed empty directories and hides internal keys', async () => {
-	const bucket = createListingBucket([createObject('.__webdav__/directories/empty.json')]);
+	const bucket = createListingBucket([createObject('.__sidecar__/empty.json')]);
 	const request = new Request('http://example.com/', { method: 'GET' });
 
 	const response = await handleGet(request, bucket);
@@ -558,7 +582,7 @@ test('GET root listing includes sidecar-backed empty directories and hides inter
 	assert.equal(response.status, 200);
 	const body = await response.text();
 	assert.match(body, /href="\/empty\/"/);
-	assert.equal(body.includes('.__webdav__'), false);
+	assert.equal(body.includes('.__sidecar__'), false);
 });
 
 test('PROPFIND depth=1 includes implicit directories from child prefixes', async () => {
@@ -576,7 +600,7 @@ test('PROPFIND depth=1 includes implicit directories from child prefixes', async
 });
 
 test('PROPFIND depth=1 includes sidecar-backed empty directories and hides internal keys', async () => {
-	const bucket = createListingBucket([createObject('.__webdav__/directories/empty.json')]);
+	const bucket = createListingBucket([createObject('.__sidecar__/empty.json')]);
 	const request = new Request('http://example.com/', {
 		method: 'PROPFIND',
 		headers: { Depth: '1' },
@@ -587,7 +611,7 @@ test('PROPFIND depth=1 includes sidecar-backed empty directories and hides inter
 	assert.equal(response.status, 207);
 	const body = await response.text();
 	assert.match(body, /<href>\/empty\/<\/href>/);
-	assert.equal(body.includes('.__webdav__'), false);
+	assert.equal(body.includes('.__sidecar__'), false);
 });
 
 test('PROPFIND uses sidecar metadata for dead properties', async () => {
@@ -595,7 +619,7 @@ test('PROPFIND uses sidecar metadata for dead properties', async () => {
 		kind: 'directory',
 		props: SIDE_CAR_PROPS,
 	});
-	const bucket = createListingBucket([createObject('.__webdav__/directories/empty.json', { bodyText: payload })]);
+	const bucket = createListingBucket([createObject('.__sidecar__/empty.json', { bodyText: payload })]);
 	const request = new Request('http://example.com/empty/', {
 		method: 'PROPFIND',
 		headers: { Depth: '0' },
@@ -619,7 +643,7 @@ test('PROPFIND prefers sidecar props over legacy metadata', async () => {
 	};
 	const bucket = createListingBucket([
 		createObject('docs', { customMetadata: legacyMetadata }),
-		createObject('.__webdav__/directories/docs.json', { bodyText: sidecarPayload }),
+		createObject('.__sidecar__/docs.json', { bodyText: sidecarPayload }),
 	]);
 	const request = new Request('http://example.com/docs/', {
 		method: 'PROPFIND',
@@ -641,7 +665,7 @@ test('PROPFIND ignores legacy metadata when sidecar payload is malformed', async
 	};
 	const bucket = createListingBucket([
 		createObject('docs', { customMetadata: legacyMetadata }),
-		createObject('.__webdav__/directories/docs.json', { bodyText: '{' }),
+		createObject('.__sidecar__/docs.json', { bodyText: '{' }),
 	]);
 	const request = new Request('http://example.com/docs/', {
 		method: 'PROPFIND',
@@ -692,7 +716,7 @@ test('PROPPATCH writes directory props to sidecar and scrubs legacy metadata', a
 	const response = await handleProppatch(request, bucket);
 
 	assert.equal(response.status, 207);
-	const sidecar = bucket.objects.get('.__webdav__/directories/docs.json');
+	const sidecar = bucket.objects.get('.__sidecar__/docs.json');
 	assert.ok(sidecar);
 	assert.deepStrictEqual(parseDirectorySidecar(sidecar.bodyText), {
 		kind: 'directory',
@@ -708,9 +732,7 @@ test('PROPPATCH writes directory props to sidecar and scrubs legacy metadata', a
 
 test('PROPPATCH accepts sidecar-only directory without trailing slash', async () => {
 	const sidecarPayload = serializeDirectorySidecar({ kind: 'directory' });
-	const bucket = createTrackingBucket([
-		createObject('.__webdav__/directories/docs.json', { bodyText: sidecarPayload }),
-	]);
+	const bucket = createTrackingBucket([createObject('.__sidecar__/docs.json', { bodyText: sidecarPayload })]);
 	const request = new Request('http://example.com/docs', {
 		method: 'PROPPATCH',
 		headers: { 'Content-Type': 'application/xml' },
@@ -720,7 +742,7 @@ test('PROPPATCH accepts sidecar-only directory without trailing slash', async ()
 	const response = await handleProppatch(request, bucket);
 
 	assert.equal(response.status, 207);
-	const sidecar = bucket.objects.get('.__webdav__/directories/docs.json');
+	const sidecar = bucket.objects.get('.__sidecar__/docs.json');
 	assert.ok(sidecar);
 	assert.deepStrictEqual(parseDirectorySidecar(sidecar.bodyText), {
 		kind: 'directory',
@@ -739,7 +761,7 @@ test('PROPPATCH lazily creates sidecar for implicit directory', async () => {
 	const response = await handleProppatch(request, bucket);
 
 	assert.equal(response.status, 207);
-	const sidecar = bucket.objects.get('.__webdav__/directories/docs.json');
+	const sidecar = bucket.objects.get('.__sidecar__/docs.json');
 	assert.ok(sidecar);
 	assert.deepStrictEqual(parseDirectorySidecar(sidecar.bodyText), {
 		kind: 'directory',
@@ -752,7 +774,7 @@ test('PROPPATCH ignores stale sidecar for file paths', async () => {
 	const sidecarPayload = serializeDirectorySidecar({ kind: 'directory', props: SIDE_CAR_PROPS });
 	const bucket = createTrackingBucket([
 		createObject('file.txt', { bodyText: 'hello' }),
-		createObject('.__webdav__/directories/file.txt.json', { bodyText: sidecarPayload }),
+		createObject('.__sidecar__/file.txt.json', { bodyText: sidecarPayload }),
 	]);
 	const request = new Request('http://example.com/file.txt', {
 		method: 'PROPPATCH',
@@ -766,11 +788,11 @@ test('PROPPATCH ignores stale sidecar for file paths', async () => {
 	const updatedObject = bucket.objects.get('file.txt');
 	assert.ok(updatedObject);
 	assert.equal(updatedObject.customMetadata[DEAD_PROPERTY_KEY], JSON.stringify(UPDATED_DISPLAYNAME_PROPERTY));
-	const sidecar = bucket.objects.get('.__webdav__/directories/file.txt.json');
+	const sidecar = bucket.objects.get('.__sidecar__/file.txt.json');
 	assert.ok(sidecar);
 	assert.equal(sidecar.bodyText, sidecarPayload);
 	assert.equal(
-		bucket.operations.put.some((entry) => entry.key === '.__webdav__/directories/file.txt.json'),
+		bucket.operations.put.some((entry) => entry.key === '.__sidecar__/file.txt.json'),
 		false,
 	);
 });
@@ -784,7 +806,7 @@ test('PROPPATCH does not fall back to legacy when sidecar payload is malformed',
 	};
 	const bucket = createTrackingBucket([
 		createObject('docs', { customMetadata: legacyMetadata }),
-		createObject('.__webdav__/directories/docs.json', { bodyText: '{' }),
+		createObject('.__sidecar__/docs.json', { bodyText: '{' }),
 	]);
 	const request = new Request('http://example.com/docs/', {
 		method: 'PROPPATCH',
@@ -795,7 +817,7 @@ test('PROPPATCH does not fall back to legacy when sidecar payload is malformed',
 	const response = await handleProppatch(request, bucket);
 
 	assert.equal(response.status, 207);
-	const sidecar = bucket.objects.get('.__webdav__/directories/docs.json');
+	const sidecar = bucket.objects.get('.__sidecar__/docs.json');
 	assert.ok(sidecar);
 	assert.deepStrictEqual(parseDirectorySidecar(sidecar.bodyText), {
 		kind: 'directory',
@@ -816,7 +838,7 @@ test('LOCK creates sidecar for nested implicit directory', async () => {
 	const response = await handleLock(request, bucket);
 
 	assert.equal(response.status, 201);
-	const sidecar = bucket.objects.get('.__webdav__/directories/a/b.json');
+	const sidecar = bucket.objects.get('.__sidecar__/a/b.json');
 	assert.ok(sidecar);
 	const parsed = parseDirectorySidecar(sidecar.bodyText);
 	assert.ok(parsed?.locks?.length);
@@ -840,16 +862,16 @@ test('MKCOL creates directory sidecar without legacy marker object', async () =>
 	assert.equal(response.status, 201);
 	assert.deepEqual(
 		bucket.operations.put.map((entry) => entry.key),
-		['.__webdav__/directories/docs.json'],
+		['.__sidecar__/docs.json'],
 	);
 	assert.equal(bucket.objects.has('docs'), false);
-	const sidecar = bucket.objects.get('.__webdav__/directories/docs.json');
+	const sidecar = bucket.objects.get('.__sidecar__/docs.json');
 	assert.ok(sidecar);
 	assert.deepStrictEqual(parseDirectorySidecar(sidecar.bodyText), { kind: 'directory' });
 });
 
 test('MKCOL rejects implicit ancestor created by nested sidecar', async () => {
-	const bucket = createTrackingBucket([createObject('.__webdav__/directories/docs/sub.json')]);
+	const bucket = createTrackingBucket([createObject('.__sidecar__/docs/sub.json')]);
 	const request = new Request('http://example.com/docs/', { method: 'MKCOL' });
 
 	const response = await handleMkcol(request, bucket);
@@ -871,8 +893,8 @@ test('DELETE removes directory sidecars and descendants', async () => {
 	const sidecarPayload = serializeDirectorySidecar({ kind: 'directory' });
 	const bucket = createTrackingBucket([
 		createObject('docs/readme.txt', { bodyText: 'hello' }),
-		createObject('.__webdav__/directories/docs.json', { bodyText: sidecarPayload }),
-		createObject('.__webdav__/directories/docs/sub.json', { bodyText: sidecarPayload }),
+		createObject('.__sidecar__/docs.json', { bodyText: sidecarPayload }),
+		createObject('.__sidecar__/docs/sub.json', { bodyText: sidecarPayload }),
 	]);
 	const request = new Request('http://example.com/docs/', { method: 'DELETE' });
 
@@ -880,15 +902,13 @@ test('DELETE removes directory sidecars and descendants', async () => {
 
 	assert.equal(response.status, 204);
 	assert.ok(bucket.operations.delete.includes('docs/readme.txt'));
-	assert.ok(bucket.operations.delete.includes('.__webdav__/directories/docs.json'));
-	assert.ok(bucket.operations.delete.includes('.__webdav__/directories/docs/sub.json'));
+	assert.ok(bucket.operations.delete.includes('.__sidecar__/docs.json'));
+	assert.ok(bucket.operations.delete.includes('.__sidecar__/docs/sub.json'));
 });
 
 test('DELETE blocks when directory sidecar lock is missing token', async () => {
 	const sidecarPayload = serializeDirectorySidecar({ kind: 'directory', locks: [LOCK_DETAIL_SAMPLE] });
-	const bucket = createTrackingBucket([
-		createObject('.__webdav__/directories/docs.json', { bodyText: sidecarPayload }),
-	]);
+	const bucket = createTrackingBucket([createObject('.__sidecar__/docs.json', { bodyText: sidecarPayload })]);
 	const request = new Request('http://example.com/docs/', { method: 'DELETE' });
 
 	const response = await handleDelete(request, bucket);
@@ -903,7 +923,7 @@ test('DELETE ignores legacy lock when descendant sidecar payload is malformed', 
 	};
 	const bucket = createTrackingBucket([
 		createObject('docs/sub', { customMetadata: legacyMetadata }),
-		createObject('.__webdav__/directories/docs/sub.json', { bodyText: '{' }),
+		createObject('.__sidecar__/docs/sub.json', { bodyText: '{' }),
 	]);
 	const request = new Request('http://example.com/docs/', { method: 'DELETE' });
 
@@ -916,7 +936,7 @@ test('DELETE blocks when descendant sidecar lock is missing token', async () => 
 	const sidecarPayload = serializeDirectorySidecar({ kind: 'directory', locks: [LOCK_DETAIL_SAMPLE] });
 	const bucket = createTrackingBucket([
 		createObject('docs/readme.txt', { bodyText: 'hello' }),
-		createObject('.__webdav__/directories/docs/sub.json', { bodyText: sidecarPayload }),
+		createObject('.__sidecar__/docs/sub.json', { bodyText: sidecarPayload }),
 	]);
 	const request = new Request('http://example.com/docs/', { method: 'DELETE' });
 
@@ -947,7 +967,7 @@ test('COPY blocks when destination sidecar lock is missing token', async () => {
 	const sidecarPayload = serializeDirectorySidecar({ kind: 'directory', locks: [LOCK_DETAIL_SAMPLE] });
 	const bucket = createTrackingBucket([
 		createObject('source/readme.txt', { bodyText: 'new' }),
-		createObject('.__webdav__/directories/dest.json', { bodyText: sidecarPayload }),
+		createObject('.__sidecar__/dest.json', { bodyText: sidecarPayload }),
 	]);
 	const request = new Request('http://example.com/source/', {
 		method: 'COPY',
@@ -970,7 +990,7 @@ test('COPY blocks when destination has both sidecar and legacy object lock', asy
 	const bucket = createTrackingBucket([
 		createObject('source/readme.txt', { bodyText: 'new' }),
 		createObject('dest', { customMetadata: legacyMetadata }),
-		createObject('.__webdav__/directories/dest.json', { bodyText: sidecarPayload }),
+		createObject('.__sidecar__/dest.json', { bodyText: sidecarPayload }),
 	]);
 	const request = new Request('http://example.com/source/', {
 		method: 'COPY',
@@ -1008,7 +1028,7 @@ test('MOVE blocks when source sidecar lock is missing token', async () => {
 	const sidecarPayload = serializeDirectorySidecar({ kind: 'directory', locks: [LOCK_DETAIL_SAMPLE] });
 	const bucket = createTrackingBucket([
 		createObject('source/readme.txt', { bodyText: 'new' }),
-		createObject('.__webdav__/directories/source.json', { bodyText: sidecarPayload }),
+		createObject('.__sidecar__/source.json', { bodyText: sidecarPayload }),
 	]);
 	const request = new Request('http://example.com/source/', {
 		method: 'MOVE',
@@ -1024,9 +1044,7 @@ test('MOVE blocks when source sidecar lock is missing token', async () => {
 
 test('UNLOCK removes sidecar-only directory lock', async () => {
 	const sidecarPayload = serializeDirectorySidecar({ kind: 'directory', locks: [LOCK_DETAIL_SAMPLE] });
-	const bucket = createTrackingBucket([
-		createObject('.__webdav__/directories/docs.json', { bodyText: sidecarPayload }),
-	]);
+	const bucket = createTrackingBucket([createObject('.__sidecar__/docs.json', { bodyText: sidecarPayload })]);
 	const request = new Request('http://example.com/docs/', {
 		method: 'UNLOCK',
 		headers: {
@@ -1037,7 +1055,7 @@ test('UNLOCK removes sidecar-only directory lock', async () => {
 	const response = await handleUnlock(request, bucket);
 
 	assert.equal(response.status, 204);
-	const updated = bucket.objects.get('.__webdav__/directories/docs.json');
+	const updated = bucket.objects.get('.__sidecar__/docs.json');
 	assert.ok(updated);
 	assert.deepStrictEqual(parseDirectorySidecar(updated.bodyText), { kind: 'directory' });
 });
@@ -1050,7 +1068,7 @@ test('UNLOCK removes mixed-state directory locks from object and sidecar', async
 	};
 	const bucket = createTrackingBucket([
 		createObject('docs', { customMetadata: legacyMetadata }),
-		createObject('.__webdav__/directories/docs.json', { bodyText: sidecarPayload }),
+		createObject('.__sidecar__/docs.json', { bodyText: sidecarPayload }),
 	]);
 	const request = new Request('http://example.com/docs/', {
 		method: 'UNLOCK',
@@ -1062,7 +1080,7 @@ test('UNLOCK removes mixed-state directory locks from object and sidecar', async
 	const response = await handleUnlock(request, bucket);
 
 	assert.equal(response.status, 204);
-	const updatedSidecar = bucket.objects.get('.__webdav__/directories/docs.json');
+	const updatedSidecar = bucket.objects.get('.__sidecar__/docs.json');
 	assert.ok(updatedSidecar);
 	assert.deepStrictEqual(parseDirectorySidecar(updatedSidecar.bodyText), { kind: 'directory' });
 	const updatedObject = bucket.objects.get('docs');
@@ -1072,9 +1090,7 @@ test('UNLOCK removes mixed-state directory locks from object and sidecar', async
 
 test('LOCK refresh works for sidecar-only directory lock', async () => {
 	const sidecarPayload = serializeDirectorySidecar({ kind: 'directory', locks: [LOCK_DETAIL_SAMPLE] });
-	const bucket = createTrackingBucket([
-		createObject('.__webdav__/directories/docs.json', { bodyText: sidecarPayload }),
-	]);
+	const bucket = createTrackingBucket([createObject('.__sidecar__/docs.json', { bodyText: sidecarPayload })]);
 	const request = new Request('http://example.com/docs/', {
 		method: 'LOCK',
 		headers: {
@@ -1086,7 +1102,7 @@ test('LOCK refresh works for sidecar-only directory lock', async () => {
 	const response = await handleLock(request, bucket);
 
 	assert.equal(response.status, 200);
-	const updated = bucket.objects.get('.__webdav__/directories/docs.json');
+	const updated = bucket.objects.get('.__sidecar__/docs.json');
 	assert.ok(updated);
 	const parsed = parseDirectorySidecar(updated.bodyText);
 	assert.ok(parsed?.locks?.some((lock) => lock.token === LOCK_DETAIL_SAMPLE.token));
@@ -1109,7 +1125,7 @@ test('LOCK refresh migrates legacy directory lock to sidecar', async () => {
 	const response = await handleLock(request, bucket);
 
 	assert.equal(response.status, 200);
-	const updatedSidecar = bucket.objects.get('.__webdav__/directories/docs.json');
+	const updatedSidecar = bucket.objects.get('.__sidecar__/docs.json');
 	assert.ok(updatedSidecar);
 	const parsed = parseDirectorySidecar(updatedSidecar.bodyText);
 	const refreshedSidecar = parsed?.locks?.find((lock) => lock.token === LOCK_DETAIL_SAMPLE.token);
@@ -1128,7 +1144,7 @@ test('LOCK refresh updates mixed-state sidecar locks', async () => {
 	};
 	const bucket = createTrackingBucket([
 		createObject('docs', { customMetadata: legacyMetadata }),
-		createObject('.__webdav__/directories/docs.json', { bodyText: sidecarPayload }),
+		createObject('.__sidecar__/docs.json', { bodyText: sidecarPayload }),
 	]);
 	const request = new Request('http://example.com/docs/', {
 		method: 'LOCK',
@@ -1141,7 +1157,7 @@ test('LOCK refresh updates mixed-state sidecar locks', async () => {
 	const response = await handleLock(request, bucket);
 
 	assert.equal(response.status, 200);
-	const updated = bucket.objects.get('.__webdav__/directories/docs.json');
+	const updated = bucket.objects.get('.__sidecar__/docs.json');
 	assert.ok(updated);
 	const parsed = parseDirectorySidecar(updated.bodyText);
 	const refreshedSidecar = parsed?.locks?.find((lock) => lock.token === LOCK_DETAIL_SAMPLE.token);
@@ -1160,7 +1176,7 @@ test('LOCK refresh through a child resource returns the ancestor collection lock
 	const sidecarPayload = serializeDirectorySidecar({ kind: 'directory', locks: [collectionLock] });
 	const bucket = createTrackingBucket([
 		createObject('docs/file.txt', { bodyText: 'hello' }),
-		createObject('.__webdav__/directories/docs.json', { bodyText: sidecarPayload }),
+		createObject('.__sidecar__/docs.json', { bodyText: sidecarPayload }),
 	]);
 	const request = new Request('http://example.com/docs/file.txt', {
 		method: 'LOCK',
@@ -1176,7 +1192,7 @@ test('LOCK refresh through a child resource returns the ancestor collection lock
 	const body = await response.text();
 	assert.match(body, new RegExp(collectionLock.token));
 	assert.match(body, /\/docs\//);
-	const updated = bucket.objects.get('.__webdav__/directories/docs.json');
+	const updated = bucket.objects.get('.__sidecar__/docs.json');
 	assert.ok(updated);
 	const parsed = parseDirectorySidecar(updated.bodyText);
 	const refreshedLock = parsed?.locks?.find((lock) => lock.token === collectionLock.token);
@@ -1186,9 +1202,7 @@ test('LOCK refresh through a child resource returns the ancestor collection lock
 
 test('LOCK creates sidecar lock on explicit sidecar-only directory', async () => {
 	const sidecarPayload = serializeDirectorySidecar({ kind: 'directory' });
-	const bucket = createTrackingBucket([
-		createObject('.__webdav__/directories/docs.json', { bodyText: sidecarPayload }),
-	]);
+	const bucket = createTrackingBucket([createObject('.__sidecar__/docs.json', { bodyText: sidecarPayload })]);
 	const request = new Request('http://example.com/docs/', {
 		method: 'LOCK',
 		body: '<?xml version="1.0" encoding="utf-8"?><lockinfo xmlns="DAV:"><lockscope><exclusive/></lockscope><locktype><write/></locktype></lockinfo>',
@@ -1200,7 +1214,7 @@ test('LOCK creates sidecar lock on explicit sidecar-only directory', async () =>
 	const response = await handleLock(request, bucket);
 
 	assert.equal(response.status, 201);
-	const updated = bucket.objects.get('.__webdav__/directories/docs.json');
+	const updated = bucket.objects.get('.__sidecar__/docs.json');
 	assert.ok(updated);
 	const parsed = parseDirectorySidecar(updated.bodyText);
 	assert.ok(parsed?.locks?.length);
@@ -1208,9 +1222,7 @@ test('LOCK creates sidecar lock on explicit sidecar-only directory', async () =>
 
 test('LOCK accepts sidecar-only directory without trailing slash', async () => {
 	const sidecarPayload = serializeDirectorySidecar({ kind: 'directory' });
-	const bucket = createTrackingBucket([
-		createObject('.__webdav__/directories/docs.json', { bodyText: sidecarPayload }),
-	]);
+	const bucket = createTrackingBucket([createObject('.__sidecar__/docs.json', { bodyText: sidecarPayload })]);
 	const request = new Request('http://example.com/docs', {
 		method: 'LOCK',
 		body: '<?xml version="1.0" encoding="utf-8"?><lockinfo xmlns="DAV:"><lockscope><exclusive/></lockscope><locktype><write/></locktype></lockinfo>',
@@ -1222,7 +1234,7 @@ test('LOCK accepts sidecar-only directory without trailing slash', async () => {
 	const response = await handleLock(request, bucket);
 
 	assert.equal(response.status, 201);
-	const updated = bucket.objects.get('.__webdav__/directories/docs.json');
+	const updated = bucket.objects.get('.__sidecar__/docs.json');
 	assert.ok(updated);
 	const parsed = parseDirectorySidecar(updated.bodyText);
 	assert.ok(parsed?.locks?.length);
@@ -1241,7 +1253,7 @@ test('LOCK creates sidecar lock on implicit directory', async () => {
 	const response = await handleLock(request, bucket);
 
 	assert.equal(response.status, 201);
-	const updated = bucket.objects.get('.__webdav__/directories/docs.json');
+	const updated = bucket.objects.get('.__sidecar__/docs.json');
 	assert.ok(updated);
 	const parsed = parseDirectorySidecar(updated.bodyText);
 	assert.ok(parsed?.locks?.length);
@@ -1250,7 +1262,7 @@ test('LOCK creates sidecar lock on implicit directory', async () => {
 
 test('LOCK creates a null resource under a sidecar-backed parent collection', async () => {
 	const bucket = createTrackingBucket([
-		createObject('.__webdav__/directories/docs.json', { bodyText: serializeDirectorySidecar({ kind: 'directory' }) }),
+		createObject('.__sidecar__/docs.json', { bodyText: serializeDirectorySidecar({ kind: 'directory' }) }),
 	]);
 	const request = new Request('http://example.com/docs/unmapped.txt', {
 		method: 'LOCK',
@@ -1278,7 +1290,7 @@ test('LOCK refresh ignores legacy lock when sidecar has different token', async 
 	};
 	const bucket = createTrackingBucket([
 		createObject('docs', { customMetadata: legacyMetadata }),
-		createObject('.__webdav__/directories/docs.json', { bodyText: sidecarPayload }),
+		createObject('.__sidecar__/docs.json', { bodyText: sidecarPayload }),
 	]);
 	const request = new Request('http://example.com/docs/', {
 		method: 'LOCK',
@@ -1291,7 +1303,7 @@ test('LOCK refresh ignores legacy lock when sidecar has different token', async 
 	const response = await handleLock(request, bucket);
 
 	assert.equal(response.status, 423);
-	const updatedSidecar = bucket.objects.get('.__webdav__/directories/docs.json');
+	const updatedSidecar = bucket.objects.get('.__sidecar__/docs.json');
 	assert.ok(updatedSidecar);
 	const parsed = parseDirectorySidecar(updatedSidecar.bodyText);
 	assert.ok(parsed?.locks?.some((lock) => lock.token === 'sidecar-token'));
@@ -1309,7 +1321,7 @@ test('LOCK ignores stale sidecar for file paths', async () => {
 	const sidecarPayload = serializeDirectorySidecar({ kind: 'directory', locks: [LOCK_DETAIL_SAMPLE] });
 	const bucket = createTrackingBucket([
 		createObject('file.txt', { bodyText: 'hello' }),
-		createObject('.__webdav__/directories/file.txt.json', { bodyText: sidecarPayload }),
+		createObject('.__sidecar__/file.txt.json', { bodyText: sidecarPayload }),
 	]);
 	const request = new Request('http://example.com/file.txt', {
 		method: 'LOCK',
@@ -1326,11 +1338,11 @@ test('LOCK ignores stale sidecar for file paths', async () => {
 	assert.ok(updatedObject);
 	const objectLocks = JSON.parse(updatedObject.customMetadata.lock_records ?? '[]');
 	assert.ok(objectLocks.length > 0);
-	const sidecar = bucket.objects.get('.__webdav__/directories/file.txt.json');
+	const sidecar = bucket.objects.get('.__sidecar__/file.txt.json');
 	assert.ok(sidecar);
 	assert.equal(sidecar.bodyText, sidecarPayload);
 	assert.equal(
-		bucket.operations.put.some((entry) => entry.key === '.__webdav__/directories/file.txt.json'),
+		bucket.operations.put.some((entry) => entry.key === '.__sidecar__/file.txt.json'),
 		false,
 	);
 });
@@ -1346,7 +1358,7 @@ test('UNLOCK ignores legacy lock when sidecar has different token', async () => 
 	};
 	const bucket = createTrackingBucket([
 		createObject('docs', { customMetadata: legacyMetadata }),
-		createObject('.__webdav__/directories/docs.json', { bodyText: sidecarPayload }),
+		createObject('.__sidecar__/docs.json', { bodyText: sidecarPayload }),
 	]);
 	const request = new Request('http://example.com/docs/', {
 		method: 'UNLOCK',
@@ -1358,7 +1370,7 @@ test('UNLOCK ignores legacy lock when sidecar has different token', async () => 
 	const response = await handleUnlock(request, bucket);
 
 	assert.equal(response.status, 423);
-	const updatedSidecar = bucket.objects.get('.__webdav__/directories/docs.json');
+	const updatedSidecar = bucket.objects.get('.__sidecar__/docs.json');
 	assert.ok(updatedSidecar);
 	const parsed = parseDirectorySidecar(updatedSidecar.bodyText);
 	assert.ok(parsed?.locks?.some((lock) => lock.token === 'sidecar-token'));
@@ -1373,7 +1385,7 @@ test('UNLOCK ignores stale sidecar for file paths', async () => {
 	const sidecarPayload = serializeDirectorySidecar({ kind: 'directory', locks: [LOCK_DETAIL_SAMPLE] });
 	const bucket = createTrackingBucket([
 		createObject('file.txt', { bodyText: 'hello', customMetadata: { lock_records: JSON.stringify([fileLock]) } }),
-		createObject('.__webdav__/directories/file.txt.json', { bodyText: sidecarPayload }),
+		createObject('.__sidecar__/file.txt.json', { bodyText: sidecarPayload }),
 	]);
 	const request = new Request('http://example.com/file.txt', {
 		method: 'UNLOCK',
@@ -1388,11 +1400,11 @@ test('UNLOCK ignores stale sidecar for file paths', async () => {
 	const updatedObject = bucket.objects.get('file.txt');
 	assert.ok(updatedObject);
 	assert.equal(updatedObject.customMetadata.lock_records, undefined);
-	const sidecar = bucket.objects.get('.__webdav__/directories/file.txt.json');
+	const sidecar = bucket.objects.get('.__sidecar__/file.txt.json');
 	assert.ok(sidecar);
 	assert.equal(sidecar.bodyText, sidecarPayload);
 	assert.equal(
-		bucket.operations.put.some((entry) => entry.key === '.__webdav__/directories/file.txt.json'),
+		bucket.operations.put.some((entry) => entry.key === '.__sidecar__/file.txt.json'),
 		false,
 	);
 });
@@ -1410,7 +1422,7 @@ test('COPY Depth 0 from implicit directory does not report success', async () =>
 	const response = await handleCopy(request, bucket);
 
 	assert.equal(response.status, 404);
-	assert.equal(bucket.objects.has('.__webdav__/directories/dest.json'), false);
+	assert.equal(bucket.objects.has('.__sidecar__/dest.json'), false);
 	assert.equal(bucket.objects.has('dest'), false);
 });
 
@@ -1427,13 +1439,13 @@ test('COPY preserves implicit directories without creating sidecars', async () =
 
 	assert.equal(response.status, 201);
 	assert.ok(bucket.objects.has('copydocs/readme.txt'));
-	assert.equal(bucket.objects.has('.__webdav__/directories/copydocs.json'), false);
+	assert.equal(bucket.objects.has('.__sidecar__/copydocs.json'), false);
 	assert.equal(bucket.objects.has('copydocs'), false);
 });
 
 test('COPY treats sidecar-only destination as existing', async () => {
 	const bucket = createTrackingBucket([
-		createObject('.__webdav__/directories/dest.json', { bodyText: serializeDirectorySidecar({ kind: 'directory' }) }),
+		createObject('.__sidecar__/dest.json', { bodyText: serializeDirectorySidecar({ kind: 'directory' }) }),
 		createObject('source/readme.txt', { bodyText: 'new' }),
 	]);
 	const request = new Request('http://example.com/source/', {
@@ -1551,7 +1563,7 @@ test('file MOVE does not delete implicit destination before transfer', async () 
 
 test('file COPY ignores sidecar-backed destination for overwrite checks', async () => {
 	const bucket = createTrackingBucket([
-		createObject('.__webdav__/directories/dest.json', { bodyText: serializeDirectorySidecar({ kind: 'directory' }) }),
+		createObject('.__sidecar__/dest.json', { bodyText: serializeDirectorySidecar({ kind: 'directory' }) }),
 	]);
 	const request = new Request('http://example.com/source.txt', {
 		method: 'COPY',
@@ -1569,7 +1581,7 @@ test('file COPY ignores sidecar-backed destination for overwrite checks', async 
 
 test('file MOVE ignores sidecar-backed destination for overwrite checks', async () => {
 	const bucket = createTrackingBucket([
-		createObject('.__webdav__/directories/dest.json', { bodyText: serializeDirectorySidecar({ kind: 'directory' }) }),
+		createObject('.__sidecar__/dest.json', { bodyText: serializeDirectorySidecar({ kind: 'directory' }) }),
 	]);
 	const request = new Request('http://example.com/source.txt', {
 		method: 'MOVE',
@@ -1587,7 +1599,7 @@ test('file MOVE ignores sidecar-backed destination for overwrite checks', async 
 
 test('file MOVE does not delete sidecar-backed destination before transfer', async () => {
 	const bucket = createTrackingBucket([
-		createObject('.__webdav__/directories/dest.json', { bodyText: serializeDirectorySidecar({ kind: 'directory' }) }),
+		createObject('.__sidecar__/dest.json', { bodyText: serializeDirectorySidecar({ kind: 'directory' }) }),
 	]);
 	const request = new Request('http://example.com/source.txt', {
 		method: 'MOVE',
@@ -1600,7 +1612,7 @@ test('file MOVE does not delete sidecar-backed destination before transfer', asy
 	const response = await handleMove(request, bucket);
 
 	assert.equal(response.status, 201);
-	assert.ok(bucket.objects.has('.__webdav__/directories/dest.json'));
+	assert.ok(bucket.objects.has('.__sidecar__/dest.json'));
 });
 
 test('MOVE preserves implicit directories without creating sidecars', async () => {
@@ -1616,7 +1628,7 @@ test('MOVE preserves implicit directories without creating sidecars', async () =
 
 	assert.equal(response.status, 201);
 	assert.ok(bucket.objects.has('moved/readme.txt'));
-	assert.equal(bucket.objects.has('.__webdav__/directories/moved.json'), false);
+	assert.equal(bucket.objects.has('.__sidecar__/moved.json'), false);
 	assert.equal(bucket.objects.has('moved'), false);
 	assert.ok(bucket.operations.delete.includes('docs/readme.txt'));
 });
@@ -1642,7 +1654,7 @@ test('COPY migrates legacy directory markers to sidecars', async () => {
 	assert.equal(response.status, 201);
 	assert.ok(bucket.objects.has('backup/readme.txt'));
 	assert.equal(bucket.objects.has('backup'), false);
-	const sidecar = bucket.objects.get('.__webdav__/directories/backup.json');
+	const sidecar = bucket.objects.get('.__sidecar__/backup.json');
 	assert.ok(sidecar);
 	assert.deepStrictEqual(parseDirectorySidecar(sidecar.bodyText), {
 		kind: 'directory',
@@ -1663,7 +1675,7 @@ test('MOVE transfers sidecars and cleans legacy markers', async () => {
 	const bucket = createTrackingBucket([
 		createObject('docs', { customMetadata: legacyMetadata }),
 		createObject('docs/readme.txt', { bodyText: 'hello' }),
-		createObject('.__webdav__/directories/docs.json', { bodyText: sidecarPayload }),
+		createObject('.__sidecar__/docs.json', { bodyText: sidecarPayload }),
 	]);
 	const request = new Request('http://example.com/docs/', {
 		method: 'MOVE',
@@ -1676,11 +1688,11 @@ test('MOVE transfers sidecars and cleans legacy markers', async () => {
 
 	assert.equal(response.status, 201);
 	assert.equal(bucket.objects.has('docs'), false);
-	assert.equal(bucket.objects.has('.__webdav__/directories/docs.json'), false);
+	assert.equal(bucket.objects.has('.__sidecar__/docs.json'), false);
 	assert.ok(bucket.operations.delete.includes('docs'));
-	assert.ok(bucket.operations.delete.includes('.__webdav__/directories/docs.json'));
+	assert.ok(bucket.operations.delete.includes('.__sidecar__/docs.json'));
 	assert.ok(bucket.objects.has('archive/readme.txt'));
-	const sidecar = bucket.objects.get('.__webdav__/directories/archive.json');
+	const sidecar = bucket.objects.get('.__sidecar__/archive.json');
 	assert.ok(sidecar);
 	assert.deepStrictEqual(parseDirectorySidecar(sidecar.bodyText), {
 		kind: 'directory',

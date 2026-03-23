@@ -39,9 +39,14 @@ wrangler secret put PASSWORD
 
 ## Directory Metadata Model
 
-目录元数据不再依赖 R2 里的同名目录标记对象。Worker 会把目录死属性和锁状态存进 `.__webdav__/directories/<path>.json` 这样的内部 sidecar，对接第三方 R2 客户端时可以避免“同名文件 + 同名文件夹”的冲突。
+目录元数据不再依赖 R2 里的同名目录标记对象。Worker 会把目录死属性和锁状态存进 `.__sidecar__/<path>.json` 这样的内部 sidecar，对接第三方 R2 客户端时可以避免“同名文件 + 同名文件夹”的冲突。
 
-`.__webdav__/` 前缀是内部保留命名空间。WebDAV 请求不能直接读写它，`COPY` / `MOVE` 到这个前缀下也会被拒绝。
+默认内部保留前缀是 `.__sidecar__`。WebDAV 请求不能直接读写这个前缀，`COPY` / `MOVE` 到这个前缀下也会被拒绝。你也可以通过 `wrangler.toml` 里的 `SIDECAR_PREFIX` 改成别的名字。
+
+```toml
+[vars]
+SIDECAR_PREFIX = ".__sidecar__"
+```
 
 如果你的存储桶里还保留旧的目录标记对象，在和其他 R2 客户端混用前先迁移：
 
@@ -57,7 +62,7 @@ node scripts/migrate-directory-sidecars.mjs --dry-run
 node scripts/migrate-directory-sidecars.mjs
 ```
 
-迁移脚本通过 Wrangler 平台代理访问配置好的 R2 绑定；它会优先复用或校验已有 sidecar，不会盲目覆盖，只有在写入或校验成功后才删除旧标记对象。
+迁移脚本通过 Wrangler 平台代理访问配置好的 R2 绑定，并使用当前 `SIDECAR_PREFIX` 配置生成 sidecar 路径；它会优先复用或校验已有 sidecar，不会盲目覆盖，只有在写入或校验成功后才删除旧标记对象。
 
 ## Development
 

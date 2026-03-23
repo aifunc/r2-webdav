@@ -1,5 +1,7 @@
 import { getCollectionPrefix, getResourceHref, makeResourcePath } from '../../domain/path';
 import { listCollectionChildren, resolveResource } from '../../domain/storage';
+import { DEFAULT_SIDECAR_CONFIG } from '../../shared/sidecar';
+import type { SidecarConfig } from '../../shared/types';
 import { escapeXml } from '../xml';
 import { createTextResponse } from './shared';
 
@@ -76,9 +78,13 @@ function calcContentRange(object: R2ObjectBody): { rangeOffset: number; rangeEnd
 	return { rangeOffset, rangeEnd };
 }
 
-async function renderDirectoryListing(bucket: R2Bucket, resourcePath: string): Promise<Response> {
+async function renderDirectoryListing(
+	bucket: R2Bucket,
+	resourcePath: string,
+	sidecarConfig: SidecarConfig,
+): Promise<Response> {
 	if (resourcePath !== '') {
-		let resolved = await resolveResource(bucket, resourcePath);
+		let resolved = await resolveResource(bucket, resourcePath, sidecarConfig);
 		if (resolved === null || !resolved.isCollection) {
 			return createTextResponse('notFound');
 		}
@@ -87,7 +93,7 @@ async function renderDirectoryListing(bucket: R2Bucket, resourcePath: string): P
 	let prefix = resourcePath === '' ? resourcePath : getCollectionPrefix(resourcePath);
 	let links = resourcePath === '' ? [] : [renderDirectoryListingLink('../', '..')];
 
-	for await (let entry of listCollectionChildren(bucket, resourcePath)) {
+	for await (let entry of listCollectionChildren(bucket, resourcePath, sidecarConfig)) {
 		let href = getResourceHref(entry.key, entry.isCollection);
 		let label = entry.object?.httpMetadata?.contentDisposition ?? entry.key.slice(prefix.length);
 		links.push(renderDirectoryListingLink(href, label));
@@ -99,8 +105,12 @@ async function renderDirectoryListing(bucket: R2Bucket, resourcePath: string): P
 	});
 }
 
-export async function handleHead(request: Request, bucket: R2Bucket): Promise<Response> {
-	let response = await handleGet(request, bucket);
+export async function handleHead(
+	request: Request,
+	bucket: R2Bucket,
+	sidecarConfig: SidecarConfig = DEFAULT_SIDECAR_CONFIG,
+): Promise<Response> {
+	let response = await handleGet(request, bucket, sidecarConfig);
 	return new Response(null, {
 		status: response.status,
 		statusText: response.statusText,
@@ -108,11 +118,15 @@ export async function handleHead(request: Request, bucket: R2Bucket): Promise<Re
 	});
 }
 
-export async function handleGet(request: Request, bucket: R2Bucket): Promise<Response> {
+export async function handleGet(
+	request: Request,
+	bucket: R2Bucket,
+	sidecarConfig: SidecarConfig = DEFAULT_SIDECAR_CONFIG,
+): Promise<Response> {
 	let resourcePath = makeResourcePath(request);
 
 	if (request.url.endsWith('/')) {
-		return renderDirectoryListing(bucket, resourcePath);
+		return renderDirectoryListing(bucket, resourcePath, sidecarConfig);
 	}
 
 	let object = await bucket.get(resourcePath, {

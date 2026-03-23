@@ -2,6 +2,8 @@ import { assertLockPermission, assertRecursiveDeletePermission, getPreservedCust
 import { getCollectionPrefix, getParentPath, isCollectionObject, makeResourcePath } from '../../domain/path';
 import { getDirectorySidecarKey, serializeDirectorySidecar } from '../../domain/directories';
 import { deleteDirectorySidecars, hasCollectionResourceOrImplicit, resolveResource } from '../../domain/storage';
+import { DEFAULT_SIDECAR_CONFIG } from '../../shared/sidecar';
+import type { SidecarConfig } from '../../shared/types';
 import { noContentResponse, createTextResponse, ensureParentCollectionResource } from './shared';
 
 async function deleteListedObjects(bucket: R2Bucket, prefix?: string): Promise<void> {
@@ -20,19 +22,23 @@ async function deleteListedObjects(bucket: R2Bucket, prefix?: string): Promise<v
 	} while (cursor !== undefined);
 }
 
-export async function handlePut(request: Request, bucket: R2Bucket): Promise<Response> {
+export async function handlePut(
+	request: Request,
+	bucket: R2Bucket,
+	sidecarConfig: SidecarConfig = DEFAULT_SIDECAR_CONFIG,
+): Promise<Response> {
 	if (request.url.endsWith('/')) {
 		return createTextResponse('methodNotAllowed');
 	}
 
 	let resourcePath = makeResourcePath(request);
-	let lockResponse = await assertLockPermission(request, bucket, resourcePath);
+	let lockResponse = await assertLockPermission(request, bucket, resourcePath, sidecarConfig);
 	if (lockResponse !== null) {
 		return lockResponse;
 	}
 
 	let existing = await bucket.head(resourcePath);
-	let parentResponse = await ensureParentCollectionResource(bucket, resourcePath);
+	let parentResponse = await ensureParentCollectionResource(bucket, resourcePath, sidecarConfig);
 	if (parentResponse !== null) {
 		return parentResponse;
 	}
@@ -46,9 +52,13 @@ export async function handlePut(request: Request, bucket: R2Bucket): Promise<Res
 	return existing === null ? new Response('', { status: 201 }) : noContentResponse();
 }
 
-export async function handleDelete(request: Request, bucket: R2Bucket): Promise<Response> {
+export async function handleDelete(
+	request: Request,
+	bucket: R2Bucket,
+	sidecarConfig: SidecarConfig = DEFAULT_SIDECAR_CONFIG,
+): Promise<Response> {
 	let resourcePath = makeResourcePath(request);
-	let lockResponse = await assertRecursiveDeletePermission(request, bucket, resourcePath);
+	let lockResponse = await assertRecursiveDeletePermission(request, bucket, resourcePath, sidecarConfig);
 	if (lockResponse !== null) {
 		return lockResponse;
 	}
@@ -58,7 +68,7 @@ export async function handleDelete(request: Request, bucket: R2Bucket): Promise<
 		return noContentResponse();
 	}
 
-	let resolved = await resolveResource(bucket, resourcePath);
+	let resolved = await resolveResource(bucket, resourcePath, sidecarConfig);
 	if (resolved === null) {
 		return createTextResponse('notFound');
 	}
@@ -68,7 +78,7 @@ export async function handleDelete(request: Request, bucket: R2Bucket): Promise<
 	}
 
 	await deleteListedObjects(bucket, getCollectionPrefix(resourcePath));
-	await deleteDirectorySidecars(bucket, resourcePath);
+	await deleteDirectorySidecars(bucket, resourcePath, sidecarConfig);
 	let storedResource = await bucket.head(resourcePath);
 	if (isCollectionObject(storedResource)) {
 		await bucket.delete(resourcePath);
@@ -76,27 +86,34 @@ export async function handleDelete(request: Request, bucket: R2Bucket): Promise<
 	return noContentResponse();
 }
 
-export async function handleMkcol(request: Request, bucket: R2Bucket): Promise<Response> {
+export async function handleMkcol(
+	request: Request,
+	bucket: R2Bucket,
+	sidecarConfig: SidecarConfig = DEFAULT_SIDECAR_CONFIG,
+): Promise<Response> {
 	if ((await request.clone().arrayBuffer()).byteLength > 0) {
 		return createTextResponse('unsupportedMediaType');
 	}
 
 	let resourcePath = makeResourcePath(request);
-	let lockResponse = await assertLockPermission(request, bucket, resourcePath);
+	let lockResponse = await assertLockPermission(request, bucket, resourcePath, sidecarConfig);
 	if (lockResponse !== null) {
 		return lockResponse;
 	}
 
-	let resolved = await resolveResource(bucket, resourcePath);
+	let resolved = await resolveResource(bucket, resourcePath, sidecarConfig);
 	if (resolved !== null) {
 		return createTextResponse('methodNotAllowed');
 	}
 
 	let parentPath = getParentPath(resourcePath);
-	if (!(await hasCollectionResourceOrImplicit(bucket, parentPath))) {
+	if (!(await hasCollectionResourceOrImplicit(bucket, parentPath, sidecarConfig))) {
 		return createTextResponse('conflict');
 	}
 
-	await bucket.put(getDirectorySidecarKey(resourcePath), serializeDirectorySidecar({ kind: 'directory' }));
+	await bucket.put(
+		getDirectorySidecarKey(resourcePath, sidecarConfig),
+		serializeDirectorySidecar({ kind: 'directory' }),
+	);
 	return new Response('', { status: 201 });
 }

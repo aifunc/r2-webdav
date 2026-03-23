@@ -1,4 +1,5 @@
-import { RESERVED_WEBDAV_PREFIX, RESERVED_WEBDAV_ROOT } from '../shared/constants';
+import { DEFAULT_SIDECAR_CONFIG, getSidecarPrefix } from '../shared/sidecar';
+import type { SidecarConfig } from '../shared/types';
 
 export function trimTrailingSlash(path: string): string {
 	if (path.endsWith('/')) {
@@ -62,8 +63,12 @@ export function joinResourcePath(basePath: string, relativePath: string): string
 	return trimTrailingSlash(`${basePath}/${relativePath}`);
 }
 
-export function isReservedWebdavNamespace(resourcePath: string): boolean {
-	return resourcePath === RESERVED_WEBDAV_ROOT || resourcePath.startsWith(RESERVED_WEBDAV_PREFIX);
+export function isReservedWebdavNamespace(
+	resourcePath: string,
+	sidecarConfig: SidecarConfig = DEFAULT_SIDECAR_CONFIG,
+): boolean {
+	let sidecarPrefix = getSidecarPrefix(sidecarConfig);
+	return resourcePath === sidecarPrefix || resourcePath.startsWith(`${sidecarPrefix}/`);
 }
 
 export function isCollectionResourceType(resourceType: string | undefined): boolean {
