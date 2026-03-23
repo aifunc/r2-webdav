@@ -20,12 +20,46 @@ import {
 import type { DirectorySidecar, SidecarConfig } from '../shared/types';
 
 const DIRECTORY_SIDECAR_SUFFIX = '.json';
+const LIST_RETRYABLE_ERROR_FRAGMENT = 'Unspecified error (0)';
+const MAX_BUCKET_LIST_ATTEMPTS = 2;
 
 export type ListedResource = {
 	key: string;
 	object: R2Object | null;
 	isCollection: boolean;
 };
+
+function getErrorMessage(error: unknown): string {
+	return error instanceof Error ? error.message : String(error);
+}
+
+function isRetryableBucketListError(error: unknown): boolean {
+	return getErrorMessage(error).includes(LIST_RETRYABLE_ERROR_FRAGMENT);
+}
+
+async function listBucket(
+	bucket: R2Bucket,
+	options: R2ListOptions,
+	context: string,
+): Promise<Awaited<ReturnType<R2Bucket['list']>>> {
+	for (let attempt = 1; ; attempt++) {
+		try {
+			return await bucket.list(options);
+		} catch (error) {
+			console.error('R2 list failed', {
+				attempt,
+				context,
+				cursor: options.cursor ?? null,
+				delimiter: options.delimiter ?? null,
+				error: getErrorMessage(error),
+				prefix: options.prefix ?? '',
+			});
+			if (attempt >= MAX_BUCKET_LIST_ATTEMPTS || !isRetryableBucketListError(error)) {
+				throw error;
+			}
+		}
+	}
+}
 
 function getDirectorySidecarRoot(sidecarConfig: SidecarConfig): string {
 	return `${getSidecarPrefix(sidecarConfig)}/`;
@@ -73,11 +107,15 @@ async function* listDirectorySidecarChildren(
 	let prefix = resourcePath === '' ? directorySidecarRoot : `${directorySidecarRoot}${resourcePath}/`;
 	let cursor: string | undefined = undefined;
 	do {
-		let r2Objects = await bucket.list({
-			prefix,
-			delimiter: '/',
-			cursor,
-		});
+		let r2Objects = await listBucket(
+			bucket,
+			{
+				prefix,
+				delimiter: '/',
+				cursor,
+			},
+			'listDirectorySidecarChildren',
+		);
 
 		for (let object of r2Objects.objects) {
 			let sidecarPath = parseDirectorySidecarPath(object.key, sidecarConfig);
@@ -250,13 +288,17 @@ async function resolveVirtualCollection(
 export async function* listAll(bucket: R2Bucket, prefix: string, isRecursive: boolean = false) {
 	let cursor: string | undefined = undefined;
 	do {
-		let r2Objects = await bucket.list({
-			prefix,
-			delimiter: isRecursive ? undefined : '/',
-			cursor,
-			// @ts-ignore https://developers.cloudflare.com/r2/api/workers/workers-api-reference/#r2listoptions
-			include: ['httpMetadata', 'customMetadata'],
-		});
+		let r2Objects = await listBucket(
+			bucket,
+			{
+				prefix,
+				delimiter: isRecursive ? undefined : '/',
+				cursor,
+				// @ts-ignore https://developers.cloudflare.com/r2/api/workers/workers-api-reference/#r2listoptions
+				include: ['httpMetadata', 'customMetadata'],
+			},
+			'listAll',
+		);
 
 		for (let object of r2Objects.objects) {
 			yield object;
@@ -277,13 +319,17 @@ export async function* listCollectionChildren(
 	let prefix = getCollectionPrefix(resourcePath);
 	let cursor: string | undefined = undefined;
 	do {
-		let r2Objects = await bucket.list({
-			prefix,
-			delimiter: '/',
-			cursor,
-			// @ts-ignore https://developers.cloudflare.com/r2/api/workers/workers-api-reference/#r2listoptions
-			include: ['httpMetadata', 'customMetadata'],
-		});
+		let r2Objects = await listBucket(
+			bucket,
+			{
+				prefix,
+				delimiter: '/',
+				cursor,
+				// @ts-ignore https://developers.cloudflare.com/r2/api/workers/workers-api-reference/#r2listoptions
+				include: ['httpMetadata', 'customMetadata'],
+			},
+			'listCollectionChildren',
+		);
 
 		for (let object of r2Objects.objects) {
 			if (isReservedWebdavNamespace(object.key, sidecarConfig)) {
