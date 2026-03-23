@@ -1,10 +1,40 @@
-import { assertLockPermission, getPreservedCustomMetadata } from '../../domain/locks';
-import { makeResourcePath } from '../../domain/path';
-import { rewriteStoredObject } from '../../domain/storage';
-import type { DeadProperty } from '../../shared/types';
+import { assertLockPermission, getPreservedCustomMetadata, stripLockMetadata } from '../../domain/locks';
+import {
+	getDirectorySidecarKey,
+	legacyMarkerToSidecar,
+	parseDirectorySidecar,
+	readLegacyDirectoryMarker,
+	serializeDirectorySidecar,
+} from '../../domain/directories';
+import { isCollectionObject, makeResourcePath } from '../../domain/path';
+import { hasCollectionResourceOrImplicit, rewriteStoredObject } from '../../domain/storage';
+import { DEAD_PROPERTY_PREFIX } from '../../shared/constants';
+import type { DeadProperty, DirectorySidecar } from '../../shared/types';
 import { getDeadPropertyKey, parseProppatchRequest } from '../xml';
 import { createTextResponse, xmlResponse } from '../responses';
 import { appendPropstatProperties, isProtectedProperty, renderProppatchResponse } from './property-shared';
+
+async function readDirectorySidecar(
+	bucket: R2Bucket,
+	resourcePath: string,
+): Promise<{ exists: boolean; sidecar: DirectorySidecar | undefined }> {
+	let sidecarObject = await bucket.get(getDirectorySidecarKey(resourcePath));
+	if (sidecarObject === null) {
+		return { exists: false, sidecar: undefined };
+	}
+	let payload = await new Response(sidecarObject.body).text();
+	return { exists: true, sidecar: parseDirectorySidecar(payload) };
+}
+
+function stripDirectoryMetadata(customMetadata: Record<string, string> | undefined): Record<string, string> {
+	let metadata = stripLockMetadata(customMetadata);
+	for (const key of Object.keys(metadata)) {
+		if (key.startsWith(DEAD_PROPERTY_PREFIX)) {
+			delete metadata[key];
+		}
+	}
+	return metadata;
+}
 
 export async function handleProppatch(request: Request, bucket: R2Bucket): Promise<Response> {
 	let resourcePath = makeResourcePath(request);
@@ -13,21 +43,51 @@ export async function handleProppatch(request: Request, bucket: R2Bucket): Promi
 		return lockResponse;
 	}
 
-	let object = await bucket.head(resourcePath);
-	if (object === null) {
-		return createTextResponse('notFound');
-	}
+	let [object, sidecarResult] = await Promise.all([
+		bucket.head(resourcePath),
+		readDirectorySidecar(bucket, resourcePath),
+	]);
 
 	let parsedRequest = parseProppatchRequest(await request.text());
 	if (parsedRequest === null) {
 		return createTextResponse('badRequest');
 	}
 
-	let customMetadata = getPreservedCustomMetadata(object.customMetadata);
+	let isFileResource = object !== null && !isCollectionObject(object);
+	let isCollectionRequest = request.url.endsWith('/') || (object === null && sidecarResult.exists);
+	let isDirectory =
+		!isFileResource &&
+		((object !== null && isCollectionObject(object)) ||
+			(object === null &&
+				isCollectionRequest &&
+				(sidecarResult.exists || (await hasCollectionResourceOrImplicit(bucket, resourcePath)))));
+	if (!isDirectory && object === null) {
+		return createTextResponse('notFound');
+	}
+
+	let customMetadata = object ? getPreservedCustomMetadata(object.customMetadata) : {};
 	let successfulSetProperties: DeadProperty[] = [];
 	let failedSetProperties: DeadProperty[] = [];
 	let successfulRemoveProperties: DeadProperty[] = [];
 	let failedRemoveProperties: DeadProperty[] = [];
+
+	let baseProps: DirectorySidecar['props'] = undefined;
+	let baseLocks: DirectorySidecar['locks'] = undefined;
+	if (isDirectory) {
+		if (sidecarResult.exists) {
+			baseProps = sidecarResult.sidecar?.props;
+			baseLocks = sidecarResult.sidecar?.locks;
+		} else if (object !== null) {
+			let legacy = readLegacyDirectoryMarker(object.customMetadata);
+			if (legacy !== undefined) {
+				let migrated = legacyMarkerToSidecar(legacy);
+				baseProps = migrated.props;
+				baseLocks = migrated.locks;
+			}
+		}
+	}
+
+	let updatedProps: DirectorySidecar['props'] = baseProps !== undefined ? { ...baseProps } : {};
 
 	for (const operation of parsedRequest.operations) {
 		if (isProtectedProperty(operation.property)) {
@@ -41,19 +101,49 @@ export async function handleProppatch(request: Request, bucket: R2Bucket): Promi
 
 		let propertyKey = getDeadPropertyKey(operation.property.namespaceURI, operation.property.localName);
 		if (operation.action === 'set') {
-			customMetadata[propertyKey] = JSON.stringify(operation.property);
+			if (isDirectory) {
+				updatedProps[propertyKey] = operation.property;
+			} else {
+				customMetadata[propertyKey] = JSON.stringify(operation.property);
+			}
 			successfulSetProperties.push(operation.property);
 		} else {
-			delete customMetadata[propertyKey];
+			if (isDirectory) {
+				delete updatedProps[propertyKey];
+			} else {
+				delete customMetadata[propertyKey];
+			}
 			successfulRemoveProperties.push(operation.property);
 		}
 	}
 
 	let hasFailures = failedSetProperties.length > 0 || failedRemoveProperties.length > 0;
 	if (!hasFailures) {
-		let updated = await rewriteStoredObject(bucket, object.key, customMetadata, object.httpMetadata);
-		if (!updated) {
-			return createTextResponse('notFound');
+		if (isDirectory) {
+			let nextSidecar: DirectorySidecar = { kind: 'directory' };
+			if (Object.keys(updatedProps).length > 0) {
+				nextSidecar.props = updatedProps;
+			}
+			if (baseLocks !== undefined && baseLocks.length > 0) {
+				nextSidecar.locks = baseLocks;
+			}
+			await bucket.put(getDirectorySidecarKey(resourcePath), serializeDirectorySidecar(nextSidecar));
+
+			if (object !== null && isCollectionObject(object)) {
+				let updatedMetadata = stripDirectoryMetadata(object.customMetadata);
+				let updated = await rewriteStoredObject(bucket, object.key, updatedMetadata, object.httpMetadata);
+				if (!updated) {
+					return createTextResponse('notFound');
+				}
+			}
+		} else {
+			if (object === null) {
+				return createTextResponse('notFound');
+			}
+			let updated = await rewriteStoredObject(bucket, object.key, customMetadata, object.httpMetadata);
+			if (!updated) {
+				return createTextResponse('notFound');
+			}
 		}
 	}
 
@@ -68,5 +158,11 @@ export async function handleProppatch(request: Request, bucket: R2Bucket): Promi
 		appendPropstatProperties(propstats, properties, status);
 	}
 
-	return xmlResponse(renderProppatchResponse(object, propstats));
+	let responseObject =
+		object ??
+		({
+			key: resourcePath,
+			customMetadata: { resourcetype: '<collection />' },
+		} as unknown as R2Object);
+	return xmlResponse(renderProppatchResponse(responseObject, propstats));
 }

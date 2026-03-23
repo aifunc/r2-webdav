@@ -1,5 +1,5 @@
-import { getResourceHref, isCollectionObject, makeResourcePath } from '../../domain/path';
-import { listAll } from '../../domain/storage';
+import { getResourceHref, makeResourcePath } from '../../domain/path';
+import { listCollectionChildren, listCollectionDescendants, resolveResource } from '../../domain/storage';
 import type { DeadProperty, PropfindRequest } from '../../shared/types';
 import {
 	escapeXml,
@@ -18,6 +18,12 @@ import { renderEmptyRequestedProperty } from './property-shared';
 type PropfindProperties = {
 	okProperties: string[];
 	missingProperties: string[];
+};
+
+type PropfindResource = {
+	key: string;
+	object: R2Object | null;
+	isCollection: boolean;
 };
 
 function getPropfindProperties(object: R2Object | null, propfindRequest: PropfindRequest): PropfindProperties {
@@ -65,9 +71,9 @@ function getPropfindProperties(object: R2Object | null, propfindRequest: Propfin
 	return { okProperties, missingProperties };
 }
 
-function generatePropfindResponse(object: R2Object | null, propfindRequest: PropfindRequest): string {
-	let href = object === null ? '/' : getResourceHref(object.key, isCollectionObject(object));
-	let { okProperties, missingProperties } = getPropfindProperties(object, propfindRequest);
+function generatePropfindResponse(resource: PropfindResource, propfindRequest: PropfindRequest): string {
+	let href = getResourceHref(resource.key, resource.isCollection);
+	let { okProperties, missingProperties } = getPropfindProperties(resource.object, propfindRequest);
 	return `
 	<response>
 		<href>${escapeXml(href)}</href>${renderPropstat('HTTP/1.1 200 OK', okProperties)}${renderPropstat('HTTP/1.1 404 Not Found', missingProperties)}
@@ -88,8 +94,11 @@ async function listPropfindResponses(
 	isRecursive: boolean,
 ): Promise<string[]> {
 	let responses: string[] = [];
-	for await (let object of listAll(bucket, resourcePath === '' ? '' : `${resourcePath}/`, isRecursive)) {
-		responses.push(generatePropfindResponse(object, propfindRequest));
+	let iterator = isRecursive
+		? listCollectionDescendants(bucket, resourcePath)
+		: listCollectionChildren(bucket, resourcePath);
+	for await (let entry of iterator) {
+		responses.push(generatePropfindResponse(entry, propfindRequest));
 	}
 
 	return responses;
@@ -121,20 +130,23 @@ export async function handlePropfind(request: Request, bucket: R2Bucket): Promis
 		return createTextResponse('badRequest');
 	}
 
-	let responses: string[] = [];
-	let isCollection: boolean;
-
-	if (resourcePath === '') {
-		responses.push(generatePropfindResponse(null, propfindRequest));
-		isCollection = true;
-	} else {
-		let object = await bucket.head(resourcePath);
-		if (object === null) {
-			return createTextResponse('notFound');
-		}
-		isCollection = isCollectionObject(object);
-		responses.push(generatePropfindResponse(object, propfindRequest));
+	let resolved = await resolveResource(bucket, resourcePath);
+	if (resolved === null) {
+		return createTextResponse('notFound');
 	}
+
+	let responses: string[] = [];
+	let isCollection = resolved.isCollection;
+	responses.push(
+		generatePropfindResponse(
+			{
+				key: resourcePath,
+				object: resolved.object,
+				isCollection: resolved.isCollection,
+			},
+			propfindRequest,
+		),
+	);
 
 	if (isCollection) {
 		let depth = request.headers.get('Depth') ?? 'infinity';

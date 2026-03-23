@@ -1,4 +1,6 @@
-function trimTrailingSlash(path: string): string {
+import { RESERVED_WEBDAV_PREFIX, RESERVED_WEBDAV_ROOT } from '../shared/constants';
+
+export function trimTrailingSlash(path: string): string {
 	if (path.endsWith('/')) {
 		return path.slice(0, -1);
 	}
@@ -58,6 +60,10 @@ export function getCollectionPrefix(resourcePath: string): string {
 
 export function joinResourcePath(basePath: string, relativePath: string): string {
 	return trimTrailingSlash(`${basePath}/${relativePath}`);
+}
+
+export function isReservedWebdavNamespace(resourcePath: string): boolean {
+	return resourcePath === RESERVED_WEBDAV_ROOT || resourcePath.startsWith(RESERVED_WEBDAV_PREFIX);
 }
 
 export function isCollectionResourceType(resourceType: string | undefined): boolean {

@@ -27,6 +27,19 @@ export type LockDetails = {
 	root: string;
 };
 
+export type DirectorySidecarProps = Record<string, DeadProperty>;
+
+export type DirectorySidecar = {
+	kind: 'directory';
+	props?: DirectorySidecarProps;
+	locks?: LockDetails[];
+};
+
+export type LegacyDirectoryMarker = {
+	props?: DirectorySidecarProps;
+	locks?: LockDetails[];
+};
+
 export type DeadProperty = {
 	namespaceURI: string;
 	localName: string;

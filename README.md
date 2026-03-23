@@ -35,6 +35,28 @@ wrangler secret put USERNAME
 wrangler secret put PASSWORD
 ```
 
+## Directory Metadata Model
+
+Directory metadata no longer relies on same-name marker objects in R2. The Worker stores directory dead properties and locks in internal sidecar objects under `.__webdav__/directories/<path>.json`, which avoids same-name file/folder collisions for third-party R2 clients.
+
+The `.__webdav__/` prefix is reserved for internal state. WebDAV requests cannot read or write that namespace directly, and `COPY` / `MOVE` destinations under that prefix are rejected with `400 Bad Request`.
+
+If your bucket still contains legacy directory marker objects, migrate them before mixing this Worker with other R2 clients:
+
+```toml
+[[r2_buckets]]
+binding = "bucket"
+bucket_name = "webdav"
+remote = true
+```
+
+```bash
+node scripts/migrate-directory-sidecars.mjs --dry-run
+node scripts/migrate-directory-sidecars.mjs
+```
+
+The migration script uses the configured R2 binding through Wrangler's platform proxy. It creates missing sidecars, validates existing sidecars instead of overwriting them, and deletes legacy markers only after a successful write or validation.
+
 ## Development
 
 With `wrangler`, you can run and deploy your Worker with the following commands:
@@ -58,6 +80,7 @@ $ npm run deploy
 
 `npm run dev` now wraps Wrangler with a project-local `XDG_CONFIG_HOME` and binds to `0.0.0.0`, which avoids local config permission issues and works more reliably in Docker-based development environments.
 Development credentials should be stored in a local `.dev.vars` file with `USERNAME` and `PASSWORD`.
+Temporary build output stays under `.tmp/`, and `.prettierignore` excludes that directory so `npm run check` still passes after running unit tests.
 
 ## Test
 

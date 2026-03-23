@@ -2,11 +2,11 @@
 
 ## Project Structure & Module Organization
 
-本仓库是一个使用 TypeScript 编写的 Cloudflare Worker WebDAV 服务。`src/index.ts` 是 Worker 入口 shim，真实入口在 `src/app/worker.ts`，方法分发在 `src/app/dispatch.ts`。领域能力收敛在 `src/domain/`，包括鉴权、路径、锁和 R2 存储；协议相关代码位于 `src/webdav/`，包括 HTTP/WebDAV handlers、XML 解析与协议响应；纯常量、类型和转义工具位于 `src/shared/`。轻量回归测试放在 `tests/`，本地开发包装脚本位于 `scripts/wrangler-dev.sh`。
+本仓库是一个使用 TypeScript 编写的 Cloudflare Worker WebDAV 服务。`src/index.ts` 是 Worker 入口 shim，真实入口在 `src/app/worker.ts`，方法分发在 `src/app/dispatch.ts`。领域能力收敛在 `src/domain/`，包括鉴权、路径、锁、目录 sidecar 和 R2 存储；协议相关代码位于 `src/webdav/`，包括 HTTP/WebDAV handlers、XML 解析与协议响应；纯常量、类型和转义工具位于 `src/shared/`。轻量回归测试放在 `tests/`，运维脚本位于 `scripts/`，其中 `scripts/migrate-directory-sidecars.mjs` 用于把旧目录标记对象迁移到 sidecar。
 
 ## Build, Test, and Development Commands
 
-使用 `npm ci` 安装依赖。使用 `npm run dev` 或 `npm start` 启动本地 Worker；脚本会自动设置项目级 `XDG_CONFIG_HOME` 并绑定 `0.0.0.0`，适合 Docker 环境。使用 `npm run check` 运行 `tsc --noEmit` 和 Prettier 校验。使用 `npm run test:unit` 执行 Node 单测。需要集成验证时，先启动本地服务，再运行 `litmus -k http://127.0.0.1:8787/ <user> <pass>`。部署命令为 `npm run deploy`。
+使用 `npm ci` 安装依赖。使用 `npm run dev` 或 `npm start` 启动本地 Worker；脚本会自动设置项目级 `XDG_CONFIG_HOME` 并绑定 `0.0.0.0`，适合 Docker 环境。使用 `npm run check` 运行 `tsc --noEmit` 和 Prettier 校验。使用 `npm run test:unit` 执行 Node 单测。若要迁移旧目录标记对象，先在目标 `[[r2_buckets]]` 上配置 `remote = true`，再运行 `node scripts/migrate-directory-sidecars.mjs --dry-run` 和正式迁移命令。需要集成验证时，先启动本地服务，再运行 `litmus -k http://127.0.0.1:8787/ <user> <pass>`。部署命令为 `npm run deploy`。
 
 ## Coding Style & Naming Conventions
 
@@ -14,7 +14,7 @@
 
 ## Testing Guidelines
 
-优先先跑 `npm run test:unit` 做快速回归，再跑 `npm run check`。涉及请求处理、COPY/MOVE 路径安全、锁、鉴权或 XML 生成时，应补充或更新 `tests/` 中的最小回归用例。GitHub Actions 会运行 `basic`、`copymove`、`props`、`locks` 四组 `litmus` 测试；本地 `http.expect100` 仍会因 Workers 本地实现限制超时，这不是新的功能回归。
+优先先跑 `npm run test:unit` 做快速回归，再跑 `npm run check`。涉及请求处理、COPY/MOVE 路径安全、锁、鉴权、目录 sidecar 迁移或 XML 生成时，应补充或更新 `tests/` 中的最小回归用例。GitHub Actions 会运行 `basic`、`copymove`、`props`、`locks` 四组 `litmus` 测试；本地 `http.expect100` 仍会因 Workers 本地实现限制超时，这不是新的功能回归。
 
 ## Commit & Pull Request Guidelines
 
@@ -22,4 +22,4 @@
 
 ## Security & Configuration Tips
 
-不要提交真实的 `USERNAME`、`PASSWORD`、`.dev.vars` 或 Cloudflare 凭据。修改 `wrangler.toml` 时，保持 `bucket` 绑定名称与代码中的 `Env.bucket` 一致。新增本地脚本或测试产物时，确认临时目录继续落在 `.tmp/`，不要把生成文件带入版本库。
+不要提交真实的 `USERNAME`、`PASSWORD`、`.dev.vars` 或 Cloudflare 凭据。修改 `wrangler.toml` 时，保持 `bucket` 绑定名称与代码中的 `Env.bucket` 一致。`.__webdav__/` 是内部保留前缀，业务逻辑和迁移脚本都不能把它当作用户可见资源处理。新增本地脚本或测试产物时，确认临时目录继续落在 `.tmp/`，不要把生成文件带入版本库。

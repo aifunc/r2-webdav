@@ -1,5 +1,5 @@
 import { getParentPath } from '../../domain/path';
-import { hasCollectionResource } from '../../domain/storage';
+import { hasCollectionResourceOrImplicit } from '../../domain/storage';
 
 type ResponseTemplateName =
 	| 'methodNotAllowed'
@@ -43,7 +43,7 @@ export function createTextResponse(templateName: ResponseTemplateName): Response
 
 export async function ensureParentCollectionResource(bucket: R2Bucket, resourcePath: string): Promise<Response | null> {
 	let parentPath = getParentPath(resourcePath);
-	if (parentPath === '' || (await hasCollectionResource(bucket, parentPath))) {
+	if (parentPath === '' || (await hasCollectionResourceOrImplicit(bucket, parentPath))) {
 		return null;
 	}
 

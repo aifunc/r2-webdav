@@ -1,6 +1,8 @@
 import { DAV_CLASS, SUPPORT_METHODS } from '../shared/constants';
+import { createTextResponse } from '../webdav/responses';
 import { handleDelete, handleGet, handleHead, handleMkcol, handlePut } from '../webdav/http/handlers';
-import { handleCopy, handleLock, handleMove, handlePropfind, handleProppatch, handleUnlock } from '../webdav';
+import { handleCopy, handleLock, handleMove, handlePropfind, handleProppatch, handleUnlock } from '../webdav/index.js';
+import { isReservedWebdavNamespace, makeResourcePath } from '../domain/path';
 
 type MethodHandler = (request: Request, bucket: R2Bucket) => Promise<Response>;
 
@@ -40,6 +42,11 @@ const METHOD_HANDLERS: Record<string, MethodHandler> = {
 };
 
 export async function dispatchHandler(request: Request, bucket: R2Bucket): Promise<Response> {
+	let resourcePath = makeResourcePath(request);
+	if (isReservedWebdavNamespace(resourcePath)) {
+		return createTextResponse('badRequest');
+	}
+
 	if (request.method === 'OPTIONS') {
 		return optionsResponse();
 	}

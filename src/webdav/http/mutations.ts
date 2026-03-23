@@ -1,5 +1,7 @@
 import { assertLockPermission, assertRecursiveDeletePermission, getPreservedCustomMetadata } from '../../domain/locks';
-import { getCollectionPrefix, isCollectionObject, makeResourcePath } from '../../domain/path';
+import { getCollectionPrefix, getParentPath, isCollectionObject, makeResourcePath } from '../../domain/path';
+import { getDirectorySidecarKey, serializeDirectorySidecar } from '../../domain/directories';
+import { deleteDirectorySidecars, hasCollectionResourceOrImplicit, resolveResource } from '../../domain/storage';
 import { noContentResponse, createTextResponse, ensureParentCollectionResource } from './shared';
 
 async function deleteListedObjects(bucket: R2Bucket, prefix?: string): Promise<void> {
@@ -56,17 +58,21 @@ export async function handleDelete(request: Request, bucket: R2Bucket): Promise<
 		return noContentResponse();
 	}
 
-	let resource = await bucket.head(resourcePath);
-	if (resource === null) {
+	let resolved = await resolveResource(bucket, resourcePath);
+	if (resolved === null) {
 		return createTextResponse('notFound');
 	}
-	if (!isCollectionObject(resource)) {
+	if (!resolved.isCollection) {
 		await bucket.delete(resourcePath);
 		return noContentResponse();
 	}
 
 	await deleteListedObjects(bucket, getCollectionPrefix(resourcePath));
-	await bucket.delete(resourcePath);
+	await deleteDirectorySidecars(bucket, resourcePath);
+	let storedResource = await bucket.head(resourcePath);
+	if (isCollectionObject(storedResource)) {
+		await bucket.delete(resourcePath);
+	}
 	return noContentResponse();
 }
 
@@ -81,19 +87,16 @@ export async function handleMkcol(request: Request, bucket: R2Bucket): Promise<R
 		return lockResponse;
 	}
 
-	let resource = await bucket.head(resourcePath);
-	if (resource !== null) {
+	let resolved = await resolveResource(bucket, resourcePath);
+	if (resolved !== null) {
 		return createTextResponse('methodNotAllowed');
 	}
 
-	let parentResponse = await ensureParentCollectionResource(bucket, resourcePath);
-	if (parentResponse !== null) {
-		return parentResponse;
+	let parentPath = getParentPath(resourcePath);
+	if (!(await hasCollectionResourceOrImplicit(bucket, parentPath))) {
+		return createTextResponse('conflict');
 	}
 
-	await bucket.put(resourcePath, new Uint8Array(), {
-		httpMetadata: request.headers,
-		customMetadata: { resourcetype: '<collection />' },
-	});
+	await bucket.put(getDirectorySidecarKey(resourcePath), serializeDirectorySidecar({ kind: 'directory' }));
 	return new Response('', { status: 201 });
 }

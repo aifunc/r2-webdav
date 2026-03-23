@@ -3,16 +3,27 @@ import {
 	getParentPath,
 	getResourceHref,
 	hasConflictingCollectionDestination,
-	isCollectionObject,
+	isReservedWebdavNamespace,
 	isSameOrDescendantPath,
 	parseDestinationPath,
 } from '../domain/path';
-import { hasCollectionResource, transferCollectionDescendants, transferObject } from '../domain/storage';
+import {
+	hasCollectionResourceOrImplicit,
+	resolveResource,
+	transferDirectoryResources,
+	transferObject,
+} from '../domain/storage';
+import type { DirectorySidecar } from '../shared/types';
 
 export type ResponseDepthHandler = () => Promise<Response>;
 export type DestinationTarget = {
 	header: string;
 	path: string;
+};
+export type TransferResource = {
+	resourcePath: string;
+	object: R2Object | null;
+	isCollection: boolean;
 };
 type ResponseTemplateName = 'badRequest' | 'notFound' | 'conflict' | 'preconditionFailed' | 'locked';
 
@@ -70,11 +81,11 @@ export function createdResponse(
 }
 
 export function transferCompletedResponse(
-	destinationExists: R2Object | null,
+	destinationExists: boolean,
 	destination: string,
 	isCollection: boolean,
 ): Response {
-	if (destinationExists !== null) {
+	if (destinationExists) {
 		return new Response(null, { status: 204 });
 	}
 
@@ -92,7 +103,11 @@ export function resolveDestinationTarget(request: Request, resourcePath: string)
 	}
 
 	let destination = parseDestinationPath(destinationHeader, request.url);
-	if (destination === null || isSameOrDescendantPath(resourcePath, destination)) {
+	if (
+		destination === null ||
+		isReservedWebdavNamespace(destination) ||
+		isSameOrDescendantPath(resourcePath, destination)
+	) {
 		return createTextResponse('badRequest');
 	}
 
@@ -103,7 +118,8 @@ export function resolveDestinationTarget(request: Request, resourcePath: string)
 }
 
 export async function ensureDestinationParentExists(bucket: R2Bucket, destination: string): Promise<Response | null> {
-	if (await hasCollectionResource(bucket, getParentPath(destination))) {
+	let parentPath = getParentPath(destination);
+	if (await hasCollectionResourceOrImplicit(bucket, parentPath)) {
 		return null;
 	}
 
@@ -123,53 +139,69 @@ export async function transferOrNotFound(
 
 export async function transferCollectionOrNotFound(
 	bucket: R2Bucket,
-	resource: R2Object,
+	resourcePath: string,
 	destination: string,
 	mapMetadata: (object: R2Object) => Record<string, string>,
-	options: { deleteSource?: boolean } = {},
+	options: {
+		deleteSource?: boolean;
+		includeDescendants?: boolean;
+		mapSidecar?: (sidecar: DirectorySidecar) => DirectorySidecar;
+	} = {},
 ): Promise<Response | null> {
-	let transferred = await transferCollectionDescendants(bucket, resource, destination, mapMetadata, options);
+	let transferred = await transferDirectoryResources(bucket, resourcePath, destination, mapMetadata, options);
 	return transferred ? null : createTextResponse('notFound');
 }
 
 export function completeTransfer(
 	transferResponse: Response | null,
-	destinationExists: R2Object | null,
+	destinationExists: boolean,
 	destination: string,
 	isCollection: boolean,
 ): Response {
 	return transferResponse ?? transferCompletedResponse(destinationExists, destination, isCollection);
 }
 
-export function validateCollectionDestination(resource: R2Object, destination: string): Response | null {
-	if (isCollectionObject(resource) && hasConflictingCollectionDestination(resource.key, destination)) {
+export function validateCollectionDestination(
+	resourcePath: string,
+	isCollection: boolean,
+	destination: string,
+): Response | null {
+	if (isCollection && hasConflictingCollectionDestination(resourcePath, destination)) {
 		return createTextResponse('badRequest');
 	}
 
 	return null;
 }
 
-export function moveDestinationValidation(resource: R2Object, destination: string): Response | null {
-	if (resource.key === destination) {
+export function moveDestinationValidation(
+	resourcePath: string,
+	isCollection: boolean,
+	destination: string,
+): Response | null {
+	if (resourcePath === destination) {
 		return createTextResponse('badRequest');
 	}
 
-	return validateCollectionDestination(resource, destination);
+	return validateCollectionDestination(resourcePath, isCollection, destination);
 }
 
 export async function loadTransferResource(
 	bucket: R2Bucket,
 	resourcePath: string,
 	destination: string,
-	validateDestination: (resource: R2Object, destination: string) => Response | null = validateCollectionDestination,
-): Promise<R2Object | Response> {
-	let resource = await bucket.head(resourcePath);
+	validateDestination: (
+		resourcePath: string,
+		isCollection: boolean,
+		destination: string,
+	) => Response | null = validateCollectionDestination,
+): Promise<TransferResource | Response> {
+	let resource = await resolveResource(bucket, resourcePath);
 	if (resource === null) {
 		return createTextResponse('notFound');
 	}
 
-	let validationResponse = validateDestination(resource, destination);
-	return validationResponse ?? resource;
+	let validationResponse = validateDestination(resourcePath, resource.isCollection, destination);
+	return validationResponse ?? { resourcePath, object: resource.object, isCollection: resource.isCollection };
 }
 
 export function buildForwardedDeleteHeaders(request: Request): Headers {

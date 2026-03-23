@@ -1,5 +1,5 @@
-import { getCollectionPrefix, getResourceHref, isCollectionObject, makeResourcePath } from '../../domain/path';
-import { listAll } from '../../domain/storage';
+import { getCollectionPrefix, getResourceHref, makeResourcePath } from '../../domain/path';
+import { listCollectionChildren, resolveResource } from '../../domain/storage';
 import { escapeXml } from '../xml';
 import { createTextResponse } from './shared';
 
@@ -78,8 +78,8 @@ function calcContentRange(object: R2ObjectBody): { rangeOffset: number; rangeEnd
 
 async function renderDirectoryListing(bucket: R2Bucket, resourcePath: string): Promise<Response> {
 	if (resourcePath !== '') {
-		let resource = await bucket.head(resourcePath);
-		if (resource === null || !isCollectionObject(resource)) {
+		let resolved = await resolveResource(bucket, resourcePath);
+		if (resolved === null || !resolved.isCollection) {
 			return createTextResponse('notFound');
 		}
 	}
@@ -87,13 +87,9 @@ async function renderDirectoryListing(bucket: R2Bucket, resourcePath: string): P
 	let prefix = resourcePath === '' ? resourcePath : getCollectionPrefix(resourcePath);
 	let links = resourcePath === '' ? [] : [renderDirectoryListingLink('../', '..')];
 
-	for await (let object of listAll(bucket, prefix)) {
-		if (object.key === resourcePath) {
-			continue;
-		}
-
-		let href = getResourceHref(object.key, isCollectionObject(object));
-		let label = object.httpMetadata?.contentDisposition ?? object.key.slice(prefix.length);
+	for await (let entry of listCollectionChildren(bucket, resourcePath)) {
+		let href = getResourceHref(entry.key, entry.isCollection);
+		let label = entry.object?.httpMetadata?.contentDisposition ?? entry.key.slice(prefix.length);
 		links.push(renderDirectoryListingLink(href, label));
 	}
 
