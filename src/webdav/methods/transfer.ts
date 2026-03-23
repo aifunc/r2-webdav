@@ -1,5 +1,7 @@
 import { assertLockPermission, getPreservedCustomMetadata, stripLockMetadata } from '../../domain/locks';
-import { isCollectionObject, makeResourcePath } from '../../domain/path';
+import { stripDirectoryLocks } from '../../domain/directories';
+import { makeResourcePath } from '../../domain/path';
+import { resolveResource } from '../../domain/storage';
 import { handleDelete } from '../http/handlers';
 import {
 	buildForwardedDeleteHeaders,
@@ -29,46 +31,60 @@ export async function handleCopy(request: Request, bucket: R2Bucket): Promise<Re
 		return lockResponse;
 	}
 
-	let parentResponse = await ensureDestinationParentExists(bucket, destination);
-	if (parentResponse !== null) {
-		return parentResponse;
-	}
-
-	let destinationExists = await bucket.head(destination);
-	if (overwriteDisabled && destinationExists) {
-		return createTextResponse('preconditionFailed');
-	}
-
 	let resource = await loadTransferResource(bucket, resourcePath, destination);
 	if (resource instanceof Response) {
 		return resource;
 	}
 
-	if (isCollectionObject(resource)) {
+	let parentResponse = await ensureDestinationParentExists(bucket, destination);
+	if (parentResponse !== null) {
+		return parentResponse;
+	}
+
+	let destinationExists = resource.isCollection
+		? (await resolveResource(bucket, destination)) !== null
+		: (await bucket.head(destination)) !== null;
+	if (overwriteDisabled && destinationExists) {
+		return createTextResponse('preconditionFailed');
+	}
+
+	if (resource.isCollection) {
 		return resolveDepthTransfer(request.headers.get('Depth') ?? 'infinity', {
 			infinity: async () => {
-				let transferResponse = await transferCollectionOrNotFound(bucket, resource, destination, (object) =>
-					stripLockMetadata(object.customMetadata),
+				let transferResponse = await transferCollectionOrNotFound(
+					bucket,
+					resource.resourcePath,
+					destination,
+					(object) => stripLockMetadata(object.customMetadata),
+					{ mapSidecar: stripDirectoryLocks },
 				);
 				return completeTransfer(transferResponse, destinationExists, destination, true);
 			},
 			'0': async () => {
-				let copyResponse = await transferOrNotFound(
+				if (resource.object === null && !destinationExists) {
+					return createTextResponse('notFound');
+				}
+				let copyResponse = await transferCollectionOrNotFound(
 					bucket,
-					resource,
+					resource.resourcePath,
 					destination,
-					stripLockMetadata(resource.customMetadata),
+					(object) => stripLockMetadata(object.customMetadata),
+					{ includeDescendants: false, mapSidecar: stripDirectoryLocks },
 				);
 				return completeTransfer(copyResponse, destinationExists, destination, true);
 			},
 		});
 	}
 
+	if (resource.object === null) {
+		return createTextResponse('notFound');
+	}
+
 	let copyResponse = await transferOrNotFound(
 		bucket,
-		resource,
+		resource.object,
 		destination,
-		stripLockMetadata(resource.customMetadata),
+		stripLockMetadata(resource.object.customMetadata),
 	);
 	if (copyResponse !== null) {
 		return copyResponse;
@@ -95,19 +111,21 @@ export async function handleMove(request: Request, bucket: R2Bucket): Promise<Re
 		return destinationLockResponse;
 	}
 
+	let resource = await loadTransferResource(bucket, resourcePath, destination, moveDestinationValidation);
+	if (resource instanceof Response) {
+		return resource;
+	}
+
 	let parentResponse = await ensureDestinationParentExists(bucket, destination);
 	if (parentResponse !== null) {
 		return parentResponse;
 	}
 
-	let destinationExists = await bucket.head(destination);
+	let destinationExists = resource.isCollection
+		? (await resolveResource(bucket, destination)) !== null
+		: (await bucket.head(destination)) !== null;
 	if (!overwrite && destinationExists) {
 		return createTextResponse('preconditionFailed');
-	}
-
-	let resource = await loadTransferResource(bucket, resourcePath, destination, moveDestinationValidation);
-	if (resource instanceof Response) {
-		return resource;
 	}
 
 	if (destinationExists) {
@@ -123,12 +141,12 @@ export async function handleMove(request: Request, bucket: R2Bucket): Promise<Re
 		}
 	}
 
-	if (isCollectionObject(resource)) {
+	if (resource.isCollection) {
 		return resolveDepthTransfer(request.headers.get('Depth') ?? 'infinity', {
 			infinity: async () => {
 				let transferResponse = await transferCollectionOrNotFound(
 					bucket,
-					resource,
+					resource.resourcePath,
 					destination,
 					(object) => getPreservedCustomMetadata(object.customMetadata),
 					{ deleteSource: true },
@@ -138,11 +156,15 @@ export async function handleMove(request: Request, bucket: R2Bucket): Promise<Re
 		});
 	}
 
+	if (resource.object === null) {
+		return createTextResponse('notFound');
+	}
+
 	let moveResponse = await transferOrNotFound(
 		bucket,
-		resource,
+		resource.object,
 		destination,
-		getPreservedCustomMetadata(resource.customMetadata),
+		getPreservedCustomMetadata(resource.object.customMetadata),
 		{ deleteSource: true },
 	);
 	if (moveResponse !== null) {

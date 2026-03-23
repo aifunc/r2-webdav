@@ -1,14 +1,16 @@
 import {
 	DEFAULT_LOCK_TIMEOUT,
+	DIRECTORY_SIDECAR_PREFIX,
 	LOCK_METADATA_KEYS,
 	LOCK_RECORDS_METADATA_KEY,
 	MAX_LOCK_TIMEOUT,
 	VALID_LOCK_DEPTHS,
 } from '../shared/constants';
 import { escapeXml } from '../shared/escape';
+import { getDirectorySidecarKey, isDirectorySidecarKey, parseDirectorySidecar } from './directories';
 import { getAncestorPaths, getCollectionPrefix } from './path';
 import { listAll } from './storage';
-import type { LockDetails } from '../shared/types';
+import type { DirectorySidecar, LockDetails } from '../shared/types';
 
 const SUPPORTED_LOCK_SCOPES: LockDetails['scope'][] = ['exclusive', 'shared'];
 const LOCK_FAILURE_RESPONSES = {
@@ -121,7 +123,16 @@ function getScopedLockDetails(
 	customMetadata: Record<string, string> | undefined,
 	options: { ignoreSharedLocksOnTarget?: boolean } = {},
 ): LockDetails[] {
-	return getLockDetails(customMetadata).filter(
+	return filterScopedLockDetails(resourcePath, candidate, getLockDetails(customMetadata), options);
+}
+
+function filterScopedLockDetails(
+	resourcePath: string,
+	candidate: string,
+	lockDetails: LockDetails[],
+	options: { ignoreSharedLocksOnTarget?: boolean } = {},
+): LockDetails[] {
+	return lockDetails.filter(
 		(lockDetail) =>
 			(candidate === resourcePath || lockDetail.depth === 'infinity') &&
 			!(options.ignoreSharedLocksOnTarget && candidate === resourcePath && lockDetail.scope === 'shared'),
@@ -178,6 +189,72 @@ export function hasLockScopeConflict(lockDetails: LockDetails[], requestedScope:
 		return lockDetails.length > 0;
 	}
 	return lockDetails.some((lockDetail) => lockDetail.scope === 'exclusive');
+}
+
+async function readDirectorySidecarFromKey(
+	bucket: R2Bucket,
+	sidecarKey: string,
+): Promise<DirectorySidecar | undefined> {
+	let object = await bucket.get(sidecarKey);
+	if (object === null) {
+		return undefined;
+	}
+	let payload = await new Response(object.body).text();
+	return parseDirectorySidecar(payload);
+}
+
+async function readDirectorySidecarLockDetails(
+	bucket: R2Bucket,
+	resourcePath: string,
+): Promise<{ exists: boolean; locks: LockDetails[] }> {
+	let sidecarKey = getDirectorySidecarKey(resourcePath);
+	let object = await bucket.get(sidecarKey);
+	if (object === null) {
+		return { exists: false, locks: [] };
+	}
+	let payload = await new Response(object.body).text();
+	let sidecar = parseDirectorySidecar(payload);
+	return { exists: true, locks: sidecar?.locks ?? [] };
+}
+
+async function readDirectorySidecarLockDetailsFromKey(bucket: R2Bucket, sidecarKey: string): Promise<LockDetails[]> {
+	let sidecar = await readDirectorySidecarFromKey(bucket, sidecarKey);
+	return sidecar?.locks ?? [];
+}
+
+export async function readLockState(
+	bucket: R2Bucket,
+	resourcePath: string,
+): Promise<{
+	resourcePath: string;
+	resource: R2Object | null;
+	locks: LockDetails[];
+	sidecarKey: string | null;
+	sidecarLocks: LockDetails[];
+	objectLocks: LockDetails[];
+	sidecarExists: boolean;
+}> {
+	let sidecarKey = getDirectorySidecarKey(resourcePath);
+	let [resource, sidecarResult] = await Promise.all([
+		bucket.head(resourcePath),
+		readDirectorySidecarLockDetails(bucket, resourcePath),
+	]);
+	let sidecarLocks = sidecarResult.locks;
+	let objectLocks = getLockDetails(resource?.customMetadata);
+	if (resource !== null && resource.customMetadata?.resourcetype !== '<collection />') {
+		sidecarLocks = [];
+		sidecarResult = { exists: false, locks: [] };
+	}
+	let locks = sidecarResult.exists ? sidecarLocks : objectLocks;
+	return {
+		resourcePath,
+		resource,
+		locks,
+		sidecarKey: sidecarResult.exists ? sidecarKey : null,
+		sidecarLocks,
+		objectLocks: sidecarResult.exists ? [] : objectLocks,
+		sidecarExists: sidecarResult.exists,
+	};
 }
 
 export function upsertLockDetails(
@@ -286,8 +363,16 @@ export async function assertLockPermission(
 
 	let lockTokens = getRequestLockTokens(request);
 	for (const candidate of getAncestorPaths(resourcePath)) {
-		let object = await bucket.head(candidate);
-		let lockDetails = getScopedLockDetails(resourcePath, candidate, object?.customMetadata, options);
+		let [resource, sidecarResult] = await Promise.all([
+			bucket.head(candidate),
+			readDirectorySidecarLockDetails(bucket, candidate),
+		]);
+		if (resource !== null && resource.customMetadata?.resourcetype !== '<collection />') {
+			sidecarResult = { exists: false, locks: [] };
+		}
+		let lockDetails = sidecarResult.exists
+			? filterScopedLockDetails(resourcePath, candidate, sidecarResult.locks, options)
+			: getScopedLockDetails(resourcePath, candidate, resource?.customMetadata, options);
 		if (lockDetails.length === 0) {
 			continue;
 		}
@@ -314,6 +399,28 @@ export async function assertRecursiveDeletePermission(
 	let prefix = getCollectionPrefix(resourcePath);
 	for await (let descendant of listAll(bucket, prefix, true)) {
 		let lockDetails = getLockDetails(descendant.customMetadata);
+		if (lockDetails.length > 0) {
+			if (descendant.customMetadata?.resourcetype === '<collection />') {
+				let sidecarKey = getDirectorySidecarKey(descendant.key);
+				let sidecarObject = await bucket.get(sidecarKey);
+				if (sidecarObject !== null) {
+					continue;
+				}
+			}
+			if (!hasMatchingLockToken(lockDetails, lockTokens)) {
+				return createLockFailureResponse('locked');
+			}
+		}
+	}
+
+	let sidecarPrefix =
+		resourcePath === '' ? `${DIRECTORY_SIDECAR_PREFIX}/` : `${DIRECTORY_SIDECAR_PREFIX}/${resourcePath}/`;
+	for await (let object of listAll(bucket, sidecarPrefix, true)) {
+		if (!isDirectorySidecarKey(object.key)) {
+			continue;
+		}
+		let sidecar = await readDirectorySidecarFromKey(bucket, object.key);
+		let lockDetails = sidecar?.locks ?? [];
 		if (lockDetails.length > 0 && !hasMatchingLockToken(lockDetails, lockTokens)) {
 			return createLockFailureResponse('locked');
 		}
@@ -326,15 +433,35 @@ export async function findMatchingLock(
 	request: Request,
 	bucket: R2Bucket,
 	resourcePath: string,
-): Promise<{ resource: R2Object; lockDetails: LockDetails } | null> {
+): Promise<{ resource: R2Object | null; lockDetails: LockDetails; sidecarKey: string | null } | null> {
 	let lockTokens = getRequestLockTokens(request);
 	for (const current of getAncestorPaths(resourcePath)) {
-		let resource = await bucket.head(current);
-		let lockDetails = getScopedLockDetails(resourcePath, current, resource?.customMetadata).find((lockDetail) =>
+		let [resource, sidecarResult] = await Promise.all([
+			bucket.head(current),
+			readDirectorySidecarLockDetails(bucket, current),
+		]);
+		if (resource !== null && resource.customMetadata?.resourcetype !== '<collection />') {
+			sidecarResult = { exists: false, locks: [] };
+		}
+		if (!sidecarResult.exists) {
+			let lockDetails = getScopedLockDetails(resourcePath, current, resource?.customMetadata).find((lockDetail) =>
+				lockTokens.includes(lockDetail.token),
+			);
+			if (lockDetails !== undefined) {
+				return { resource, lockDetails, sidecarKey: null };
+			}
+			continue;
+		}
+
+		let sidecarLockDetails = filterScopedLockDetails(resourcePath, current, sidecarResult.locks).find((lockDetail) =>
 			lockTokens.includes(lockDetail.token),
 		);
-		if (resource !== null && lockDetails !== undefined) {
-			return { resource, lockDetails };
+		if (sidecarLockDetails !== undefined) {
+			return {
+				resource,
+				lockDetails: sidecarLockDetails,
+				sidecarKey: getDirectorySidecarKey(current),
+			};
 		}
 	}
 	return null;

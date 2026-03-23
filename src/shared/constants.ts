@@ -1,5 +1,8 @@
 export const DEFAULT_LOCK_TIMEOUT = 3600;
 export const MAX_LOCK_TIMEOUT = 365 * 24 * 60 * 60;
+export const DIRECTORY_SIDECAR_PREFIX = '.__webdav__/directories';
+export const RESERVED_WEBDAV_PREFIX = '.__webdav__/';
+export const RESERVED_WEBDAV_ROOT = RESERVED_WEBDAV_PREFIX.slice(0, -1);
 export const VALID_LOCK_DEPTHS = ['0', 'infinity'] as const;
 export const LOCK_METADATA_KEYS = [
 	'lock_token',

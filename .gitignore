@@ -2,6 +2,7 @@
 
 logs
 _.log
+*.log
 npm-debug.log_
 yarn-debug.log*
 yarn-error.log*
@@ -170,3 +171,7 @@ dist
 
 .dev.vars
 .wrangler/
+.tmp/
+.worktrees/
+debug.log
+child.log
