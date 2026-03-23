@@ -34,9 +34,17 @@ function encodeBase64(bytes: Uint8Array): string {
 	return encoded;
 }
 
-function encodeBasicAuthorization(username: string, password: string): Uint8Array {
+function encodeBasicToken(username: string, password: string): Uint8Array {
 	let encoder = new TextEncoder();
-	return encoder.encode(`Basic ${encodeBase64(encoder.encode(`${username}:${password}`))}`);
+	return encoder.encode(encodeBase64(encoder.encode(`${username}:${password}`)));
+}
+
+function getAuthorizationToken(authorizationHeader: string): Uint8Array | null {
+	let match = authorizationHeader.match(/^Basic[ \t]+([A-Za-z0-9+/=]+)[ \t]*$/i);
+	if (match === null) {
+		return null;
+	}
+	return new TextEncoder().encode(match[1]);
 }
 
 function parseAuthorizedUsers(authUsers: string | undefined): BasicCredentials[] {
@@ -58,24 +66,15 @@ function parseAuthorizedUsers(authUsers: string | undefined): BasicCredentials[]
 		.filter((entry) => entry.username !== '');
 }
 
-export function getAuthorizedUsers(env: {
-	AUTH_USERS?: string;
-	USERNAME?: string;
-	PASSWORD?: string;
-}): BasicCredentials[] {
-	let authorizedUsers = parseAuthorizedUsers(env.AUTH_USERS);
-	if (authorizedUsers.length > 0) {
-		return authorizedUsers;
-	}
-	if (typeof env.USERNAME !== 'string' || typeof env.PASSWORD !== 'string') {
-		return [];
-	}
-	return [{ username: env.USERNAME, password: env.PASSWORD }];
+export function getAuthorizedUsers(env: { AUTH_USERS?: string }): BasicCredentials[] {
+	return parseAuthorizedUsers(env.AUTH_USERS);
 }
 
 export function isAuthorized(authorizationHeader: string, authorizedUsers: BasicCredentials[]): boolean {
-	let header = new TextEncoder().encode(authorizationHeader);
-	return authorizedUsers.some((entry) =>
-		timingSafeEqual(header, encodeBasicAuthorization(entry.username, entry.password)),
-	);
+	let token = getAuthorizationToken(authorizationHeader);
+	if (token === null) {
+		return false;
+	}
+
+	return authorizedUsers.some((entry) => timingSafeEqual(token, encodeBasicToken(entry.username, entry.password)));
 }

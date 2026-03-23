@@ -6,7 +6,7 @@ import {
 	readLegacyDirectoryMarker,
 	serializeDirectorySidecar,
 } from '../../domain/directories';
-import { isCollectionObject, makeResourcePath } from '../../domain/path';
+import { hasTrailingSlashPath, isCollectionObject, makeResourcePath } from '../../domain/path';
 import { hasCollectionResourceOrImplicit, rewriteStoredObject } from '../../domain/storage';
 import { DEAD_PROPERTY_PREFIX } from '../../shared/constants';
 import { DEFAULT_SIDECAR_CONFIG } from '../../shared/sidecar';
@@ -65,7 +65,7 @@ export async function handleProppatch(
 	}
 
 	let isFileResource = object !== null && !isCollectionObject(object);
-	let isCollectionRequest = request.url.endsWith('/') || (object === null && sidecarResult.exists);
+	let isCollectionRequest = hasTrailingSlashPath(request) || (object === null && sidecarResult.exists);
 	let isDirectory =
 		!isFileResource &&
 		((object !== null && isCollectionObject(object)) ||

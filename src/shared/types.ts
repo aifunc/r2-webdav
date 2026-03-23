@@ -1,7 +1,5 @@
 export interface Env {
 	bucket: R2Bucket;
-	USERNAME?: string;
-	PASSWORD?: string;
 	AUTH_USERS?: string;
 	SIDECAR_PREFIX?: string;
 }

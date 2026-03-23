@@ -9,13 +9,19 @@ import {
 	normalizeLockToken,
 	parseTimeout,
 	getPreservedCustomMetadata,
-	getRequestLockTokens,
+	getRequestLockTokensForTarget,
 	stripLockMetadata,
 	upsertLockDetails,
 	withLockMetadata,
 	readLockState,
 } from '../../domain/locks';
-import { getParentPath, getResourceHref, isCollectionObject, makeResourcePath } from '../../domain/path';
+import {
+	getParentPath,
+	getResourceHref,
+	hasTrailingSlashPath,
+	isCollectionObject,
+	makeResourcePath,
+} from '../../domain/path';
 import { hasCollectionResourceOrImplicit, rewriteStoredObject } from '../../domain/storage';
 import { DEFAULT_SIDECAR_CONFIG } from '../../shared/sidecar';
 import type { DirectorySidecar, LockDetails, SidecarConfig } from '../../shared/types';
@@ -66,7 +72,6 @@ export async function handleLock(
 	let body = await request.text();
 	let isRefreshRequest = body === '';
 	let requestedScope: LockDetails['scope'] = /<shared\b/i.test(body) ? 'shared' : 'exclusive';
-	let requestLockTokens = getRequestLockTokens(request);
 	if (body !== '' && !/<write\b/i.test(body)) {
 		return createTextResponse('badRequest');
 	}
@@ -88,6 +93,7 @@ export async function handleLock(
 	let sidecarLocks = lockState.sidecarLocks;
 	let objectLocks = lockState.objectLocks;
 	let currentLocks = lockState.locks;
+	let requestLockTokens = getRequestLockTokensForTarget(request, resource, resourcePath, resource);
 	if (refreshTarget !== null) {
 		resource = refreshTarget.resource;
 		if (refreshTarget.sidecarKey !== null) {
@@ -98,9 +104,10 @@ export async function handleLock(
 			sidecarLocks = refreshSidecarState.sidecar?.locks ?? [];
 			currentLocks = sidecarLocks;
 		}
+		requestLockTokens = getRequestLockTokensForTarget(request, resource, resourcePath, resource);
 	}
 	let isFileResource = resource !== null && !isCollectionObject(resource);
-	let isCollectionRequest = request.url.endsWith('/') || (resource === null && sidecarExists);
+	let isCollectionRequest = hasTrailingSlashPath(request) || (resource === null && sidecarExists);
 	let isDirectoryTarget =
 		!isFileResource &&
 		((resource !== null && isCollectionObject(resource)) ||
@@ -112,7 +119,7 @@ export async function handleLock(
 		isRefreshRequest &&
 		resource !== null &&
 		currentLocks.length > 0 &&
-		!currentLocks.some((currentLock) => requestLockTokens.includes(currentLock.token))
+		!currentLocks.some((currentLock) => requestLockTokens.tokens.includes(currentLock.token))
 	) {
 		return createTextResponse('locked');
 	}
@@ -129,7 +136,7 @@ export async function handleLock(
 				return createTextResponse('conflict');
 			}
 
-			if (!sidecarExists && !request.url.endsWith('/')) {
+			if (!sidecarExists && !hasTrailingSlashPath(request)) {
 				await bucket.put(resourcePath, new Uint8Array(), {
 					customMetadata: {},
 				});

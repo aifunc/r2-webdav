@@ -11,7 +11,7 @@ export { escapeXml } from '../shared/escape';
 const PROPPATCH_ACTIONS = new Set<ProppatchOperation['action']>(['set', 'remove']);
 type DavPropertyResolver = (
 	object: R2Object | null | undefined,
-	context: { currentTime: string; isCollection: boolean },
+	context: { isCollection: boolean; resourceKey: string },
 ) => string | undefined;
 const PROPFIND_REQUEST_RESOLVERS: Array<(document: Document) => PropfindRequest | null> = [
 	(document) => (hasChildElement(document.documentElement, 'propname') ? { mode: 'propname' } : null),
@@ -22,13 +22,13 @@ const PROPFIND_REQUEST_RESOLVERS: Array<(document: Document) => PropfindRequest 
 	(document) => (hasChildElement(document.documentElement, 'allprop') ? { mode: 'allprop' } : null),
 ];
 const DAV_PROPERTY_RESOLVERS = {
-	creationdate: (object, context) => object?.uploaded.toUTCString() ?? context.currentTime,
-	displayname: (object) => object?.httpMetadata?.contentDisposition,
+	creationdate: (object) => object?.uploaded.toISOString(),
+	displayname: (_object, context) => getDisplayName(context.resourceKey),
 	getcontentlanguage: (object) => object?.httpMetadata?.contentLanguage,
 	getcontentlength: (object) => (object === null || object === undefined ? '0' : object.size.toString()),
 	getcontenttype: (object) => object?.httpMetadata?.contentType,
-	getetag: (object) => object?.etag,
-	getlastmodified: (object, context) => object?.uploaded.toUTCString() ?? context.currentTime,
+	getetag: (object) => object?.httpEtag ?? (object ? `"${object.etag}"` : undefined),
+	getlastmodified: (object) => object?.uploaded.toUTCString(),
 	resourcetype: (object) =>
 		object === null || object === undefined ? '<collection />' : (object.customMetadata?.resourcetype ?? ''),
 	supportedlock: () => getSupportedLock(),
@@ -39,6 +39,13 @@ const DAV_PROPERTY_RESOLVERS = {
 export function renderDavProperty(propName: string, value: string): string {
 	let content = RAW_XML_DAV_PROPERTIES.has(propName) ? value : escapeXml(value);
 	return `<${propName}>${content}</${propName}>`;
+}
+
+function getDisplayName(resourceKey: string): string | undefined {
+	if (resourceKey === '') {
+		return undefined;
+	}
+	return resourceKey.split('/').pop();
 }
 
 function serializeNodeChildren(node: Node): string {
@@ -62,7 +69,7 @@ export function getDeadProperty(
 	if (value === undefined) {
 		return null;
 	}
-	return JSON.parse(value) as DeadProperty;
+	return parseDeadProperty(value);
 }
 
 export function getDeadProperties(metadata: Record<string, string> | undefined): DeadProperty[] {
@@ -71,7 +78,30 @@ export function getDeadProperties(metadata: Record<string, string> | undefined):
 	}
 	return Object.entries(metadata)
 		.filter(([key]) => key.startsWith(DEAD_PROPERTY_PREFIX))
-		.map(([, value]) => JSON.parse(value) as DeadProperty);
+		.flatMap(([, value]) => {
+			let property = parseDeadProperty(value);
+			return property === null ? [] : [property];
+		});
+}
+
+function isDeadProperty(value: Partial<DeadProperty> | null | undefined): value is DeadProperty {
+	return (
+		value !== null &&
+		value !== undefined &&
+		typeof value.namespaceURI === 'string' &&
+		typeof value.localName === 'string' &&
+		(value.prefix === null || typeof value.prefix === 'string') &&
+		typeof value.valueXml === 'string'
+	);
+}
+
+function parseDeadProperty(value: string): DeadProperty | null {
+	try {
+		let parsed = JSON.parse(value) as Partial<DeadProperty>;
+		return isDeadProperty(parsed) ? (parsed as DeadProperty) : null;
+	} catch {
+		return null;
+	}
 }
 
 function getQualifiedPropertyName(property: DeadProperty): string {
@@ -232,10 +262,13 @@ function getLockDiscoveryValue(object: R2Object, isCollection: boolean): string 
 	);
 }
 
-export function fromR2Object(object: R2Object | null | undefined): DavProperties {
+export function fromR2Object(
+	object: R2Object | null | undefined,
+	resourceKey: string = object?.key ?? '',
+): DavProperties {
 	let context = {
-		currentTime: new Date().toUTCString(),
 		isCollection: object === null || object === undefined ? true : isCollectionObject(object),
+		resourceKey,
 	};
 
 	return Object.fromEntries(
@@ -245,11 +278,15 @@ export function fromR2Object(object: R2Object | null | undefined): DavProperties
 	) as DavProperties;
 }
 
-export function getLivePropertyValue(object: R2Object | null, property: DeadProperty): string | undefined {
+export function getLivePropertyValue(
+	object: R2Object | null,
+	property: DeadProperty,
+	resourceKey: string = object?.key ?? '',
+): string | undefined {
 	if (property.namespaceURI !== DAV_NAMESPACE) {
 		return undefined;
 	}
-	return fromR2Object(object)[property.localName as keyof DavProperties];
+	return fromR2Object(object, resourceKey)[property.localName as keyof DavProperties];
 }
 
 export function renderPropstat(status: string, properties: string[]): string {

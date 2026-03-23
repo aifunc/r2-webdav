@@ -59,6 +59,10 @@ export function getCollectionPrefix(resourcePath: string): string {
 	return resourcePath === '' ? '' : `${resourcePath}/`;
 }
 
+export function hasTrailingSlashPath(request: Request): boolean {
+	return new URL(request.url).pathname.endsWith('/');
+}
+
 export function joinResourcePath(basePath: string, relativePath: string): string {
 	return trimTrailingSlash(`${basePath}/${relativePath}`);
 }

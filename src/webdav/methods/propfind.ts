@@ -28,9 +28,13 @@ type PropfindResource = {
 	isCollection: boolean;
 };
 
-function getPropfindProperties(object: R2Object | null, propfindRequest: PropfindRequest): PropfindProperties {
+function getPropfindProperties(
+	resourceKey: string,
+	object: R2Object | null,
+	propfindRequest: PropfindRequest,
+): PropfindProperties {
 	let deadProperties = getDeadProperties(object?.customMetadata);
-	let liveProperties = Object.entries(fromR2Object(object)).flatMap(([key, value]) =>
+	let liveProperties = Object.entries(fromR2Object(object, resourceKey)).flatMap(([key, value]) =>
 		value === undefined ? [] : [renderDavProperty(key, value)],
 	);
 
@@ -44,7 +48,7 @@ function getPropfindProperties(object: R2Object | null, propfindRequest: Propfin
 		}
 		case 'propname': {
 			okProperties = [
-				...Object.entries(fromR2Object(object)).flatMap(([key, value]) =>
+				...Object.entries(fromR2Object(object, resourceKey)).flatMap(([key, value]) =>
 					value === undefined ? [] : [renderDavProperty(key, '')],
 				),
 				...deadProperties.map(renderEmptyRequestedProperty),
@@ -53,7 +57,7 @@ function getPropfindProperties(object: R2Object | null, propfindRequest: Propfin
 		}
 		case 'prop': {
 			for (const property of propfindRequest.properties) {
-				let liveValue = getLivePropertyValue(object, property);
+				let liveValue = getLivePropertyValue(object, property, resourceKey);
 				if (liveValue !== undefined) {
 					okProperties.push(renderDavProperty(property.localName, liveValue));
 					continue;
@@ -75,7 +79,7 @@ function getPropfindProperties(object: R2Object | null, propfindRequest: Propfin
 
 function generatePropfindResponse(resource: PropfindResource, propfindRequest: PropfindRequest): string {
 	let href = getResourceHref(resource.key, resource.isCollection);
-	let { okProperties, missingProperties } = getPropfindProperties(resource.object, propfindRequest);
+	let { okProperties, missingProperties } = getPropfindProperties(resource.key, resource.object, propfindRequest);
 	return `
 	<response>
 		<href>${escapeXml(href)}</href>${renderPropstat('HTTP/1.1 200 OK', okProperties)}${renderPropstat('HTTP/1.1 404 Not Found', missingProperties)}

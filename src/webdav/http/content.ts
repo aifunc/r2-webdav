@@ -1,4 +1,4 @@
-import { getCollectionPrefix, getResourceHref, makeResourcePath } from '../../domain/path';
+import { getCollectionPrefix, getResourceHref, hasTrailingSlashPath, makeResourcePath } from '../../domain/path';
 import { listCollectionChildren, resolveResource } from '../../domain/storage';
 import { DEFAULT_SIDECAR_CONFIG } from '../../shared/sidecar';
 import type { SidecarConfig } from '../../shared/types';
@@ -67,9 +67,9 @@ function calcContentRange(object: R2ObjectBody): { rangeOffset: number; rangeEnd
 	let rangeOffset = 0;
 	let rangeEnd = object.size - 1;
 	if (object.range) {
-		if ('suffix' in object.range) {
-			rangeOffset = object.size - object.range.suffix;
-		} else {
+		if ('suffix' in object.range && object.range.suffix !== undefined) {
+			rangeOffset = Math.max(object.size - object.range.suffix, 0);
+		} else if ('offset' in object.range || 'length' in object.range) {
 			rangeOffset = object.range.offset ?? 0;
 			let length = object.range.length ?? object.size - rangeOffset;
 			rangeEnd = Math.min(rangeOffset + length - 1, object.size - 1);
@@ -96,7 +96,7 @@ async function renderDirectoryListing(
 
 	for await (let entry of listCollectionChildren(bucket, resourcePath, sidecarConfig)) {
 		let href = getResourceHref(entry.key, entry.isCollection);
-		let label = entry.object?.httpMetadata?.contentDisposition ?? entry.key.slice(prefix.length);
+		let label = entry.key.slice(prefix.length);
 		links.push(renderDirectoryListingLink(href, label));
 	}
 
@@ -126,7 +126,7 @@ export async function handleGet(
 ): Promise<Response> {
 	let resourcePath = makeResourcePath(request);
 
-	if (request.url.endsWith('/')) {
+	if (hasTrailingSlashPath(request)) {
 		return renderDirectoryListing(bucket, resourcePath, sidecarConfig);
 	}
 

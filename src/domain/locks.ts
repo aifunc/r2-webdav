@@ -8,7 +8,7 @@ import {
 import { escapeXml } from '../shared/escape';
 import { DEFAULT_SIDECAR_CONFIG, getSidecarPrefix } from '../shared/sidecar';
 import { getDirectorySidecarKey, isDirectorySidecarKey, parseDirectorySidecar } from './directories';
-import { getAncestorPaths, getCollectionPrefix } from './path';
+import { decodeResourcePath, getAncestorPaths, getCollectionPrefix } from './path';
 import { listAll } from './storage';
 import type { DirectorySidecar, LockDetails, SidecarConfig } from '../shared/types';
 
@@ -312,29 +312,220 @@ export function parseTimeout(timeoutHeader: string | null): { timeout: string; e
 	return getDefaultTimeout();
 }
 
-export function getRequestLockTokens(request: Request): string[] {
+function getDirectRequestLockTokens(request: Request): string[] {
 	let lockTokens: string[] = [];
 	let directLockToken = request.headers.get('Lock-Token');
 	if (directLockToken) {
 		lockTokens.push(normalizeLockToken(directLockToken));
 	}
 
-	let ifHeader = request.headers.get('If');
-	if (ifHeader) {
-		for (const match of ifHeader.matchAll(/<([^>]+)>/g)) {
-			let token = normalizeLockToken(match[1]);
-			if (token !== '') {
-				lockTokens.push(token);
-			}
-		}
-	}
-
 	return [...new Set(lockTokens)];
 }
 
-function hasAlwaysFalseIfCondition(request: Request): boolean {
-	let ifHeader = request.headers.get('If') ?? '';
-	return ifHeader.includes('<DAV:no-lock>') && !ifHeader.includes('Not <DAV:no-lock>');
+type IfHeaderStateCondition = {
+	kind: 'token' | 'etag';
+	negated: boolean;
+	value: string;
+};
+
+type IfHeaderConditionList = {
+	conditions: IfHeaderStateCondition[];
+	tagPath: string | null;
+};
+
+function skipWhitespace(value: string, index: number): number {
+	while (index < value.length && /\s/u.test(value[index])) {
+		index++;
+	}
+	return index;
+}
+
+function readBracketedValue(
+	value: string,
+	index: number,
+	open: string,
+	close: string,
+): { nextIndex: number; value: string } | null {
+	if (value[index] !== open) {
+		return null;
+	}
+
+	let nextIndex = value.indexOf(close, index + 1);
+	if (nextIndex === -1) {
+		return null;
+	}
+
+	return {
+		nextIndex: nextIndex + 1,
+		value: value.slice(index + 1, nextIndex),
+	};
+}
+
+function parseIfHeaderTagPath(tagValue: string, requestUrl: string): string | null {
+	try {
+		let taggedUrl = new URL(tagValue, requestUrl);
+		if (taggedUrl.origin !== new URL(requestUrl).origin) {
+			return null;
+		}
+		return decodeResourcePath(taggedUrl.pathname);
+	} catch {
+		return null;
+	}
+}
+
+function parseIfHeader(ifHeader: string | null, requestUrl: string): IfHeaderConditionList[] | null {
+	let value = ifHeader?.trim() ?? '';
+	if (value === '') {
+		return [];
+	}
+
+	let conditionLists: IfHeaderConditionList[] = [];
+	let index = 0;
+	while (index < value.length) {
+		index = skipWhitespace(value, index);
+		if (index >= value.length) {
+			return conditionLists;
+		}
+
+		let tagPath: string | null = null;
+		if (value[index] === '<') {
+			let taggedResource = readBracketedValue(value, index, '<', '>');
+			if (taggedResource === null) {
+				return null;
+			}
+			tagPath = parseIfHeaderTagPath(taggedResource.value, requestUrl);
+			if (tagPath === null) {
+				return null;
+			}
+			index = skipWhitespace(value, taggedResource.nextIndex);
+		}
+
+		let sawConditionList = false;
+		while (value[index] === '(') {
+			sawConditionList = true;
+			index++;
+			let conditions: IfHeaderStateCondition[] = [];
+
+			while (index < value.length) {
+				index = skipWhitespace(value, index);
+				if (index >= value.length) {
+					return null;
+				}
+				if (value[index] === ')') {
+					if (conditions.length === 0) {
+						return null;
+					}
+					index++;
+					break;
+				}
+
+				let negated = false;
+				if (value.slice(index, index + 3).toLowerCase() === 'not' && /\s/u.test(value[index + 3] ?? '')) {
+					negated = true;
+					index = skipWhitespace(value, index + 3);
+				}
+
+				let token = readBracketedValue(value, index, '<', '>');
+				if (token !== null) {
+					conditions.push({ kind: 'token', negated, value: token.value });
+					index = token.nextIndex;
+					continue;
+				}
+
+				let etag = readBracketedValue(value, index, '[', ']');
+				if (etag !== null) {
+					conditions.push({ kind: 'etag', negated, value: etag.value });
+					index = etag.nextIndex;
+					continue;
+				}
+
+				return null;
+			}
+
+			conditionLists.push({ conditions, tagPath });
+			index = skipWhitespace(value, index);
+		}
+
+		if (!sawConditionList) {
+			return null;
+		}
+	}
+
+	return conditionLists;
+}
+
+function getEntityTags(resource: R2Object | null): string[] {
+	let etag = resource?.httpEtag ?? (resource ? `"${resource.etag}"` : undefined);
+	return etag === undefined ? [] : [etag];
+}
+
+function matchEtagConditions(conditions: IfHeaderStateCondition[], resource: R2Object | null): boolean {
+	let entityTags = getEntityTags(resource);
+	return conditions
+		.filter((condition) => condition.kind === 'etag')
+		.every((condition) =>
+			condition.negated ? !entityTags.includes(condition.value) : entityTags.includes(condition.value),
+		);
+}
+
+function collectPositiveLockTokens(conditions: IfHeaderStateCondition[]): string[] {
+	if (
+		conditions.some(
+			(condition) =>
+				condition.kind === 'token' && !condition.negated && condition.value.toLowerCase() === 'dav:no-lock',
+		)
+	) {
+		return [];
+	}
+
+	return conditions.flatMap((condition) => {
+		if (condition.kind !== 'token' || condition.negated || condition.value.toLowerCase() === 'dav:no-lock') {
+			return [];
+		}
+
+		let token = normalizeLockToken(condition.value);
+		return token === '' ? [] : [token];
+	});
+}
+
+export function getRequestLockTokensForTarget(
+	request: Request,
+	requestResource: R2Object | null,
+	targetPath: string,
+	targetResource: R2Object | null,
+): { unsupported: boolean; tokens: string[] } {
+	let conditionLists = parseIfHeader(request.headers.get('If'), request.url);
+	if (conditionLists === null) {
+		return { unsupported: true, tokens: [] };
+	}
+
+	let tokens = getDirectRequestLockTokens(request);
+	for (const { conditions, tagPath } of conditionLists) {
+		if (
+			conditions.some(
+				(condition) =>
+					condition.kind === 'token' && condition.negated && condition.value.toLowerCase() !== 'dav:no-lock',
+			)
+		) {
+			return { unsupported: true, tokens: [] };
+		}
+		if (tagPath !== null && tagPath !== targetPath) {
+			continue;
+		}
+
+		let resource = tagPath === null ? requestResource : targetResource;
+		if (!matchEtagConditions(conditions, resource)) {
+			continue;
+		}
+
+		tokens.push(...collectPositiveLockTokens(conditions));
+	}
+
+	return { unsupported: false, tokens: [...new Set(tokens)] };
+}
+
+function getResourcePathFromSidecarKey(key: string, sidecarConfig: SidecarConfig): string {
+	return key.slice(`${getSidecarPrefix(sidecarConfig)}/`.length, -'.json'.length);
 }
 
 export function extractLockOwner(body: string): string | undefined {
@@ -354,11 +545,7 @@ export async function assertLockPermission(
 	sidecarConfig: SidecarConfig = DEFAULT_SIDECAR_CONFIG,
 	options: { ignoreSharedLocksOnTarget?: boolean } = {},
 ): Promise<Response | null> {
-	if (hasAlwaysFalseIfCondition(request)) {
-		return createLockFailureResponse('preconditionFailed');
-	}
-
-	let lockTokens = getRequestLockTokens(request);
+	let requestResource = resourcePath === '' ? null : await bucket.head(resourcePath);
 	for (const candidate of getAncestorPaths(resourcePath)) {
 		let [resource, sidecarResult] = await Promise.all([
 			bucket.head(candidate),
@@ -374,7 +561,11 @@ export async function assertLockPermission(
 			continue;
 		}
 
-		if (!hasMatchingLockToken(lockDetails, lockTokens)) {
+		let requestLockTokens = getRequestLockTokensForTarget(request, requestResource, candidate, resource);
+		if (requestLockTokens.unsupported) {
+			return createLockFailureResponse('preconditionFailed');
+		}
+		if (!hasMatchingLockToken(lockDetails, requestLockTokens.tokens)) {
 			return createLockFailureResponse('locked');
 		}
 	}
@@ -393,7 +584,7 @@ export async function assertRecursiveDeletePermission(
 		return lockResponse;
 	}
 
-	let lockTokens = getRequestLockTokens(request);
+	let requestResource = resourcePath === '' ? null : await bucket.head(resourcePath);
 	let prefix = getCollectionPrefix(resourcePath);
 	for await (let descendant of listAll(bucket, prefix, true)) {
 		let lockDetails = getLockDetails(descendant.customMetadata);
@@ -405,7 +596,11 @@ export async function assertRecursiveDeletePermission(
 					continue;
 				}
 			}
-			if (!hasMatchingLockToken(lockDetails, lockTokens)) {
+			let requestLockTokens = getRequestLockTokensForTarget(request, requestResource, descendant.key, descendant);
+			if (requestLockTokens.unsupported) {
+				return createLockFailureResponse('preconditionFailed');
+			}
+			if (!hasMatchingLockToken(lockDetails, requestLockTokens.tokens)) {
 				return createLockFailureResponse('locked');
 			}
 		}
@@ -418,7 +613,21 @@ export async function assertRecursiveDeletePermission(
 		}
 		let sidecar = await readDirectorySidecarFromKey(bucket, object.key);
 		let lockDetails = sidecar?.locks ?? [];
-		if (lockDetails.length > 0 && !hasMatchingLockToken(lockDetails, lockTokens)) {
+		if (lockDetails.length === 0) {
+			continue;
+		}
+
+		let currentPath = getResourcePathFromSidecarKey(object.key, sidecarConfig);
+		let requestLockTokens = getRequestLockTokensForTarget(
+			request,
+			requestResource,
+			currentPath,
+			await bucket.head(currentPath),
+		);
+		if (requestLockTokens.unsupported) {
+			return createLockFailureResponse('preconditionFailed');
+		}
+		if (!hasMatchingLockToken(lockDetails, requestLockTokens.tokens)) {
 			return createLockFailureResponse('locked');
 		}
 	}
@@ -432,7 +641,7 @@ export async function findMatchingLock(
 	resourcePath: string,
 	sidecarConfig: SidecarConfig = DEFAULT_SIDECAR_CONFIG,
 ): Promise<{ resource: R2Object | null; lockDetails: LockDetails; sidecarKey: string | null } | null> {
-	let lockTokens = getRequestLockTokens(request);
+	let requestResource = resourcePath === '' ? null : await bucket.head(resourcePath);
 	for (const current of getAncestorPaths(resourcePath)) {
 		let [resource, sidecarResult] = await Promise.all([
 			bucket.head(current),
@@ -441,9 +650,13 @@ export async function findMatchingLock(
 		if (resource !== null && resource.customMetadata?.resourcetype !== '<collection />') {
 			sidecarResult = { exists: false, locks: [] };
 		}
+		let requestLockTokens = getRequestLockTokensForTarget(request, requestResource, current, resource);
+		if (requestLockTokens.unsupported) {
+			return null;
+		}
 		if (!sidecarResult.exists) {
 			let lockDetails = getScopedLockDetails(resourcePath, current, resource?.customMetadata).find((lockDetail) =>
-				lockTokens.includes(lockDetail.token),
+				requestLockTokens.tokens.includes(lockDetail.token),
 			);
 			if (lockDetails !== undefined) {
 				return { resource, lockDetails, sidecarKey: null };
@@ -452,7 +665,7 @@ export async function findMatchingLock(
 		}
 
 		let sidecarLockDetails = filterScopedLockDetails(resourcePath, current, sidecarResult.locks).find((lockDetail) =>
-			lockTokens.includes(lockDetail.token),
+			requestLockTokens.tokens.includes(lockDetail.token),
 		);
 		if (sidecarLockDetails !== undefined) {
 			return {

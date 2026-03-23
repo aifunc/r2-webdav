@@ -1,5 +1,11 @@
 import { assertLockPermission, assertRecursiveDeletePermission, getPreservedCustomMetadata } from '../../domain/locks';
-import { getCollectionPrefix, getParentPath, isCollectionObject, makeResourcePath } from '../../domain/path';
+import {
+	getCollectionPrefix,
+	getParentPath,
+	hasTrailingSlashPath,
+	isCollectionObject,
+	makeResourcePath,
+} from '../../domain/path';
 import { getDirectorySidecarKey, serializeDirectorySidecar } from '../../domain/directories';
 import { deleteDirectorySidecars, hasCollectionResourceOrImplicit, resolveResource } from '../../domain/storage';
 import { DEFAULT_SIDECAR_CONFIG } from '../../shared/sidecar';
@@ -33,7 +39,7 @@ export async function handlePut(
 	bucket: R2Bucket,
 	sidecarConfig: SidecarConfig = DEFAULT_SIDECAR_CONFIG,
 ): Promise<Response> {
-	if (request.url.endsWith('/')) {
+	if (hasTrailingSlashPath(request)) {
 		return createTextResponse('methodNotAllowed');
 	}
 
@@ -73,14 +79,13 @@ export async function handleDelete(
 	sidecarConfig: SidecarConfig = DEFAULT_SIDECAR_CONFIG,
 ): Promise<Response> {
 	let resourcePath = makeResourcePath(request);
+	if (resourcePath === '') {
+		return createTextResponse('forbidden');
+	}
+
 	let lockResponse = await assertRecursiveDeletePermission(request, bucket, resourcePath, sidecarConfig);
 	if (lockResponse !== null) {
 		return lockResponse;
-	}
-
-	if (resourcePath === '') {
-		await deleteListedObjects(bucket);
-		return noContentResponse();
 	}
 
 	let resolved = await resolveResource(bucket, resourcePath, sidecarConfig);
