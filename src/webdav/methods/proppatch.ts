@@ -2,9 +2,9 @@ import { assertLockPermission, getPreservedCustomMetadata, stripLockMetadata } f
 import {
 	getDirectorySidecarKey,
 	legacyMarkerToSidecar,
-	parseDirectorySidecar,
+	readDirectorySidecarState,
 	readLegacyDirectoryMarker,
-	serializeDirectorySidecar,
+	updateDirectorySidecar,
 } from '../../domain/directories';
 import { hasTrailingSlashPath, isCollectionObject, makeResourcePath } from '../../domain/path';
 import { hasCollectionResourceOrImplicit, rewriteStoredObject } from '../../domain/storage';
@@ -12,22 +12,9 @@ import { DEAD_PROPERTY_PREFIX } from '../../shared/constants';
 import { DEFAULT_SIDECAR_CONFIG } from '../../shared/sidecar';
 import type { DeadProperty, DirectorySidecar, SidecarConfig } from '../../shared/types';
 import { getDeadPropertyKey, parseProppatchRequest } from '../xml';
-import { createTextResponse, xmlResponse } from '../responses';
+import { createTextResponse, readXmlBodyWithLimit, xmlResponse } from '../responses';
 import { appendPropstatProperties, isProtectedProperty, renderProppatchResponse } from './property-shared';
 import { assertUnmodifiedSince, buildResourceVersionHeaders } from '../http/shared';
-
-async function readDirectorySidecar(
-	bucket: R2Bucket,
-	resourcePath: string,
-	sidecarConfig: SidecarConfig,
-): Promise<{ exists: boolean; sidecar: DirectorySidecar | undefined }> {
-	let sidecarObject = await bucket.get(getDirectorySidecarKey(resourcePath, sidecarConfig));
-	if (sidecarObject === null) {
-		return { exists: false, sidecar: undefined };
-	}
-	let payload = await new Response(sidecarObject.body).text();
-	return { exists: true, sidecar: parseDirectorySidecar(payload) };
-}
 
 function stripDirectoryMetadata(customMetadata: Record<string, string> | undefined): Record<string, string> {
 	let metadata = stripLockMetadata(customMetadata);
@@ -52,14 +39,18 @@ export async function handleProppatch(
 
 	let [object, sidecarResult] = await Promise.all([
 		bucket.head(resourcePath),
-		readDirectorySidecar(bucket, resourcePath, sidecarConfig),
+		readDirectorySidecarState(bucket, getDirectorySidecarKey(resourcePath, sidecarConfig)),
 	]);
 	let preconditionResponse = assertUnmodifiedSince(request, object);
 	if (preconditionResponse !== null) {
 		return preconditionResponse;
 	}
 
-	let parsedRequest = parseProppatchRequest(await request.text());
+	let body = await readXmlBodyWithLimit(request);
+	if (body === null) {
+		return createTextResponse('payloadTooLarge');
+	}
+	let parsedRequest = parseProppatchRequest(body);
 	if (parsedRequest === null) {
 		return createTextResponse('badRequest');
 	}
@@ -98,8 +89,6 @@ export async function handleProppatch(
 		}
 	}
 
-	let updatedProps: DirectorySidecar['props'] = baseProps !== undefined ? { ...baseProps } : {};
-
 	for (const operation of parsedRequest.operations) {
 		if (isProtectedProperty(operation.property)) {
 			if (operation.action === 'set') {
@@ -110,19 +99,15 @@ export async function handleProppatch(
 			continue;
 		}
 
-		let propertyKey = getDeadPropertyKey(operation.property.namespaceURI, operation.property.localName);
 		if (operation.action === 'set') {
-			if (isDirectory) {
-				updatedProps[propertyKey] = operation.property;
-			} else {
-				customMetadata[propertyKey] = JSON.stringify(operation.property);
+			if (!isDirectory) {
+				customMetadata[getDeadPropertyKey(operation.property.namespaceURI, operation.property.localName)] =
+					JSON.stringify(operation.property);
 			}
 			successfulSetProperties.push(operation.property);
 		} else {
-			if (isDirectory) {
-				delete updatedProps[propertyKey];
-			} else {
-				delete customMetadata[propertyKey];
+			if (!isDirectory) {
+				delete customMetadata[getDeadPropertyKey(operation.property.namespaceURI, operation.property.localName)];
 			}
 			successfulRemoveProperties.push(operation.property);
 		}
@@ -132,21 +117,44 @@ export async function handleProppatch(
 	let responseHeaders: HeadersInit = {};
 	if (!hasFailures) {
 		if (isDirectory) {
-			let nextSidecar: DirectorySidecar = { kind: 'directory' };
-			if (Object.keys(updatedProps).length > 0) {
-				nextSidecar.props = updatedProps;
+			let writeResponse = await updateDirectorySidecar(
+				bucket,
+				getDirectorySidecarKey(resourcePath, sidecarConfig),
+				(currentSidecar) => {
+					let nextProps: Record<string, DeadProperty> = { ...(currentSidecar?.props ?? baseProps ?? {}) };
+					for (const property of successfulSetProperties) {
+						nextProps[getDeadPropertyKey(property.namespaceURI, property.localName)] = property;
+					}
+					for (const property of successfulRemoveProperties) {
+						delete nextProps[getDeadPropertyKey(property.namespaceURI, property.localName)];
+					}
+					let nextSidecar: DirectorySidecar = {
+						kind: 'directory',
+						...(currentSidecar?.uploaded !== undefined ? { uploaded: currentSidecar.uploaded } : {}),
+					};
+					if (Object.keys(nextProps).length > 0) {
+						nextSidecar.props = nextProps;
+					}
+					let locks = currentSidecar?.locks ?? baseLocks;
+					if (locks !== undefined && locks.length > 0) {
+						nextSidecar.locks = locks;
+					}
+					return nextSidecar;
+				},
+			);
+			if (writeResponse !== null) {
+				return writeResponse;
 			}
-			if (baseLocks !== undefined && baseLocks.length > 0) {
-				nextSidecar.locks = baseLocks;
-			}
-			await bucket.put(getDirectorySidecarKey(resourcePath, sidecarConfig), serializeDirectorySidecar(nextSidecar));
 
 			if (object !== null && isCollectionObject(object)) {
-				let updatedMetadata = stripDirectoryMetadata(object.customMetadata);
-				let updated = await rewriteStoredObject(bucket, object.key, updatedMetadata, object.httpMetadata);
-				if (!updated) {
-					return createTextResponse('notFound');
-				}
+				// sidecar 已写入且为目录元数据真源；legacy marker 清理若因并发改写失败，
+				// 仅残留冗余 marker（sidecar 优先），不应让客户端看到误导性的 404。
+				await rewriteStoredObject(
+					bucket,
+					object.key,
+					stripDirectoryMetadata(object.customMetadata),
+					object.httpMetadata,
+				);
 			}
 		} else {
 			if (object === null) {

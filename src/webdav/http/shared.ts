@@ -1,59 +1,13 @@
-import { DAV_CLASS, SUPPORT_METHODS } from '../../shared/constants';
 import { getParentPath } from '../../domain/path';
 import { hasCollectionResourceOrImplicit } from '../../domain/storage';
 import { DEFAULT_SIDECAR_CONFIG } from '../../shared/sidecar';
 import type { SidecarConfig } from '../../shared/types';
 
-type ResponseTemplateName =
-	| 'methodNotAllowed'
-	| 'notFound'
-	| 'forbidden'
-	| 'conflict'
-	| 'preconditionFailed'
-	| 'unsupportedMediaType';
-
-const RESPONSE_TEMPLATES: Record<ResponseTemplateName, { body: string; status: number }> = {
-	methodNotAllowed: {
-		body: 'Method Not Allowed',
-		status: 405,
-	},
-	notFound: {
-		body: 'Not Found',
-		status: 404,
-	},
-	forbidden: {
-		body: 'Forbidden',
-		status: 403,
-	},
-	conflict: {
-		body: 'Conflict',
-		status: 409,
-	},
-	preconditionFailed: {
-		body: 'Precondition Failed',
-		status: 412,
-	},
-	unsupportedMediaType: {
-		body: 'Unsupported Media Type',
-		status: 415,
-	},
-};
+import { createTextResponse } from '../responses';
+export { createTextResponse };
 
 export function noContentResponse(headers: HeadersInit = {}): Response {
 	return new Response(null, { status: 204, headers });
-}
-
-export function createTextResponse(templateName: ResponseTemplateName): Response {
-	return new Response(RESPONSE_TEMPLATES[templateName].body, {
-		status: RESPONSE_TEMPLATES[templateName].status,
-		headers:
-			templateName === 'methodNotAllowed'
-				? {
-						Allow: SUPPORT_METHODS.join(', '),
-						DAV: DAV_CLASS,
-					}
-				: undefined,
-	});
 }
 
 export function buildResourceVersionHeaders(
@@ -77,6 +31,22 @@ export function assertUnmodifiedSince(request: Request, resource: { uploaded: Da
 	}
 
 	return resource.uploaded.getTime() > threshold + 999 ? createTextResponse('preconditionFailed') : null;
+}
+
+export function assertIfMatch(request: Request, resource: { etag: string; httpEtag?: string } | null): Response | null {
+	let ifMatch = request.headers.get('If-Match');
+	if (ifMatch === null) {
+		return null;
+	}
+	if (resource === null) {
+		return createTextResponse('preconditionFailed');
+	}
+	let etag = resource.httpEtag || `"${resource.etag}"`;
+	let tags = ifMatch.split(',').map((tag) => tag.trim());
+	if (tags.includes('*') || tags.includes(etag)) {
+		return null;
+	}
+	return createTextResponse('preconditionFailed');
 }
 
 export async function ensureParentCollectionResource(

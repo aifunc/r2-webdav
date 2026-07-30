@@ -6,13 +6,14 @@ import { pathToFileURL } from 'node:url';
 import {
 	getDirectorySidecarKey,
 	isDirectorySidecarKey,
-	isReservedWebdavPath,
 	parseDirectorySidecar,
 	serializeDirectorySidecar,
 	readLegacyDirectoryMarker,
 	coalesceDirectoryMetadata,
 	getLegacyDirectoryMigrationPlan,
 } from '../src/domain/directories.js';
+import { decodeResourcePath, isReservedWebdavNamespace } from '../src/domain/path.js';
+import { DEFAULT_SIDECAR_PREFIX, resolveSidecarConfig } from '../src/shared/sidecar.js';
 import { dispatchHandler } from '../src/app/dispatch.js';
 import { handleDelete, handleGet, handleMkcol, handlePut } from '../src/webdav/http/handlers.js';
 import {
@@ -25,7 +26,7 @@ import {
 } from '../src/webdav/index.js';
 
 const { matchesLegacyDirectoryMarker } = await import(
-	pathToFileURL(path.resolve('scripts/migrate-directory-sidecars.mjs')).href,
+	pathToFileURL(path.resolve('scripts/migrate-directory-sidecars.mjs')).href
 );
 
 const LOCK_DETAIL_SAMPLE = {
@@ -81,9 +82,9 @@ test('detects sidecar object keys under the configured prefix', () => {
 });
 
 test('detects reserved sidecar namespace paths', () => {
-	assert.equal(isReservedWebdavPath('.__sidecar__/docs.json'), true);
-	assert.equal(isReservedWebdavPath('docs/.__sidecar__/meta.json'), false);
-	assert.equal(isReservedWebdavPath('.__meta__/docs.json', { sidecarPrefix: '.__meta__' }), true);
+	assert.equal(isReservedWebdavNamespace('.__sidecar__/docs.json'), true);
+	assert.equal(isReservedWebdavNamespace('docs/.__sidecar__/meta.json'), false);
+	assert.equal(isReservedWebdavNamespace('.__meta__/docs.json', { sidecarPrefix: '.__meta__' }), true);
 });
 
 const SIDE_CAR_PROPS = { [DEAD_PROPERTY_KEY]: DISPLAYNAME_PROPERTY };
@@ -1208,7 +1209,7 @@ test('MKCOL creates directory sidecar without legacy marker object', async () =>
 	assert.equal(bucket.objects.has('docs'), false);
 	const sidecar = bucket.objects.get('.__sidecar__/docs.json');
 	assert.ok(sidecar);
-	assert.deepStrictEqual(parseDirectorySidecar(sidecar.bodyText), { kind: 'directory' });
+	assert.equal(parseDirectorySidecar(sidecar.bodyText).kind, 'directory');
 });
 
 test('MKCOL rejects implicit ancestor created by nested sidecar', async () => {
@@ -2236,4 +2237,210 @@ test('MOVE transfers sidecars and cleans legacy markers', async () => {
 		props: { [DEAD_PROPERTY_KEY]: DISPLAYNAME_PROPERTY },
 	});
 	assert.equal(bucket.objects.has('archive'), false);
+});
+
+test('LOCK refresh with empty body and no token on an unlocked resource returns 400', async () => {
+	const bucket = createTrackingBucket([createObject('file.txt', { bodyText: 'hello' })]);
+	const request = new Request('http://example.com/file.txt', {
+		method: 'LOCK',
+	});
+
+	const response = await handleLock(request, bucket);
+
+	assert.equal(response.status, 400);
+	assert.equal(bucket.objects.has('.__sidecar__/file.txt.json'), false);
+});
+
+test('PROPPATCH set on DAV:getetag returns 403 and does not persist the protected property', async () => {
+	const sidecarPayload = serializeDirectorySidecar({
+		kind: 'directory',
+		props: { [DEAD_PROPERTY_KEY]: DISPLAYNAME_PROPERTY },
+	});
+	const bucket = createTrackingBucket([createObject('.__sidecar__/docs.json', { bodyText: sidecarPayload })]);
+	const request = new Request('http://example.com/docs/', {
+		method: 'PROPPATCH',
+		headers: { 'Content-Type': 'application/xml' },
+		body: '<?xml version="1.0" encoding="utf-8"?>\n<propertyupdate xmlns="DAV:"><set><prop><getetag>evil</getetag></prop></set></propertyupdate>',
+	});
+
+	const response = await handleProppatch(request, bucket);
+
+	assert.equal(response.status, 207);
+	const body = await response.text();
+	assert.match(body, /<status>HTTP\/1\.1 403 Forbidden<\/status>/);
+	const sidecar = bucket.objects.get('.__sidecar__/docs.json');
+	assert.ok(sidecar);
+	assert.deepStrictEqual(parseDirectorySidecar(sidecar.bodyText), {
+		kind: 'directory',
+		props: { [DEAD_PROPERTY_KEY]: DISPLAYNAME_PROPERTY },
+	});
+});
+
+test('PROPFIND with Content-Length over 1MB returns 413', async () => {
+	const bucket = createTrackingBucket([createObject('file.txt', { bodyText: 'hello' })]);
+	const request = new Request('http://example.com/file.txt', {
+		method: 'PROPFIND',
+		headers: {
+			'Content-Type': 'application/xml',
+			'Content-Length': String(1024 * 1024 + 1),
+		},
+	});
+
+	const response = await handlePropfind(request, bucket);
+
+	assert.equal(response.status, 413);
+});
+
+test('PUT to an existing collection path returns 409', async () => {
+	const bucket = createTrackingBucket([createObject('docs', { customMetadata: { resourcetype: '<collection />' } })]);
+	const request = new Request('http://example.com/docs', { method: 'PUT', body: 'x' });
+
+	const response = await handlePut(request, bucket);
+
+	assert.equal(response.status, 409);
+});
+
+test('resolveSidecarConfig rejects SIDECAR_PREFIX without a leading dot', () => {
+	assert.equal(resolveSidecarConfig({ SIDECAR_PREFIX: 'docs' }).sidecarPrefix, DEFAULT_SIDECAR_PREFIX);
+	assert.equal(resolveSidecarConfig({ SIDECAR_PREFIX: '.__sidecar__' }).sidecarPrefix, '.__sidecar__');
+	assert.equal(resolveSidecarConfig({}).sidecarPrefix, DEFAULT_SIDECAR_PREFIX);
+});
+
+test('PUT to a sidecar-only collection returns 409', async () => {
+	const bucket = createTrackingBucket([
+		createObject('.__sidecar__/docs.json', {
+			bodyText: serializeDirectorySidecar({ kind: 'directory', uploaded: new Date('2024-01-01T00:00:00.000Z') }),
+		}),
+	]);
+	const request = new Request('http://example.com/docs', { method: 'PUT', body: 'x' });
+
+	const response = await handlePut(request, bucket);
+
+	assert.equal(response.status, 409);
+});
+
+test('PROPPATCH preserves directory sidecar uploaded timestamp', async () => {
+	const original = new Date('2024-01-01T00:00:00.000Z');
+	const bucket = createTrackingBucket([
+		createObject('.__sidecar__/docs.json', {
+			bodyText: serializeDirectorySidecar({ kind: 'directory', uploaded: original }),
+		}),
+	]);
+	const request = new Request('http://example.com/docs/', {
+		method: 'PROPPATCH',
+		body: '<?xml version="1.0"?><propertyupdate xmlns="DAV:"><set><prop><displayname>Docs</displayname></prop></set></propertyupdate>',
+	});
+
+	const response = await handleProppatch(request, bucket);
+
+	assert.equal(response.status, 207);
+	const sidecar = parseDirectorySidecar(bucket.objects.get('.__sidecar__/docs.json').bodyText);
+	assert.deepStrictEqual(sidecar.uploaded, original);
+});
+
+// --- 对抗式审计回归用例 ---
+
+test('UNLOCK with an unknown lock token returns 409 instead of 412', async () => {
+	const bucket = createTrackingBucket([createObject('file.txt', { bodyText: 'hello' })]);
+	const request = new Request('http://example.com/file.txt', {
+		method: 'UNLOCK',
+		headers: {
+			'Lock-Token': '<urn:uuid:does-not-exist>',
+		},
+	});
+
+	const response = await handleUnlock(request, bucket);
+
+	assert.equal(response.status, 409);
+});
+
+test('PUT with an unrelated Lock-Token header is not rejected with 412', async () => {
+	const bucket = createTrackingBucket();
+	const request = new Request('http://example.com/new.txt', {
+		method: 'PUT',
+		headers: {
+			'Lock-Token': `<urn:uuid:${LOCK_DETAIL_SAMPLE.token}>`,
+		},
+		body: 'data',
+	});
+
+	const response = await handlePut(request, bucket);
+
+	assert.equal(response.status, 201);
+});
+
+test('MOVE collection with Depth 0 is treated as Depth infinity', async () => {
+	const bucket = createTrackingBucket([createObject('docs/readme.txt', { bodyText: 'hello' })]);
+	const request = new Request('http://example.com/docs/', {
+		method: 'MOVE',
+		headers: {
+			Destination: 'http://example.com/moved/',
+			Depth: '0',
+		},
+	});
+
+	const response = await handleMove(request, bucket);
+
+	assert.equal(response.status, 201);
+	assert.ok(bucket.objects.has('moved/readme.txt'));
+	assert.ok(bucket.operations.delete.includes('docs/readme.txt'));
+});
+
+test('decodeResourcePath collapses repeated slashes', () => {
+	assert.equal(decodeResourcePath('//foo/bar'), 'foo/bar');
+	assert.equal(decodeResourcePath('/foo//bar/'), 'foo/bar');
+	assert.equal(decodeResourcePath('/foo/bar'), 'foo/bar');
+	assert.equal(isReservedWebdavNamespace(decodeResourcePath('//.__sidecar__/docs.json')), true);
+});
+
+// --- 修复审查 f1 回归用例 ---
+
+test('PROPPATCH rejects dead property values containing DAV: namespace elements', async () => {
+	const bucket = createTrackingBucket([createObject('file.txt', { bodyText: 'hello' })]);
+	const request = new Request('http://example.com/file.txt', {
+		method: 'PROPPATCH',
+		headers: { 'Content-Type': 'application/xml' },
+		body: '<?xml version="1.0"?><D:propertyupdate xmlns:D="DAV:"><D:set><D:prop><x:custom xmlns:x="http://x/" xmlns:D="DAV:"><D:response><D:href>/injected</D:href></D:response></x:custom></D:prop></D:set></D:propertyupdate>',
+	});
+
+	const response = await handleProppatch(request, bucket);
+
+	assert.equal(response.status, 400);
+	assert.equal(
+		Object.keys(bucket.objects.get('file.txt').customMetadata).some((key) => key.startsWith('dead_property:')),
+		false,
+	);
+});
+
+test('PROPPATCH accepts dead property values with non-DAV namespace child elements', async () => {
+	const bucket = createTrackingBucket([createObject('file.txt', { bodyText: 'hello' })]);
+	const request = new Request('http://example.com/file.txt', {
+		method: 'PROPPATCH',
+		headers: { 'Content-Type': 'application/xml' },
+		body: '<?xml version="1.0"?><D:propertyupdate xmlns:D="DAV:"><D:set><D:prop><x:custom xmlns:x="http://x/"><x:extra>text</x:extra></x:custom></D:prop></D:set></D:propertyupdate>',
+	});
+
+	const response = await handleProppatch(request, bucket);
+
+	assert.equal(response.status, 207);
+	const metadata = bucket.objects.get('file.txt').customMetadata;
+	const stored = Object.entries(metadata).find(([key]) => key.startsWith('dead_property:'));
+	assert.ok(stored);
+	assert.match(stored[1], /x:extra/);
+});
+
+test('PUT with the same unknown token in If and Lock-Token headers returns 412', async () => {
+	const bucket = createTrackingBucket();
+	const request = new Request('http://example.com/new.txt', {
+		method: 'PUT',
+		headers: {
+			If: '(<urn:uuid:unknown-token>)',
+			'Lock-Token': '<urn:uuid:unknown-token>',
+		},
+		body: 'data',
+	});
+
+	const response = await handlePut(request, bucket);
+
+	assert.equal(response.status, 412);
 });

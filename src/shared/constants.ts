@@ -1,5 +1,6 @@
 export const DEFAULT_LOCK_TIMEOUT = 3600;
-export const MAX_LOCK_TIMEOUT = 365 * 24 * 60 * 60;
+export const MAX_LOCK_TIMEOUT = 7 * 24 * 60 * 60;
+export const PROPFIND_MAX_ENTRIES = 5000;
 export const VALID_LOCK_DEPTHS = ['0', 'infinity'] as const;
 export const LOCK_METADATA_KEYS = [
 	'lock_token',

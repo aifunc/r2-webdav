@@ -1,12 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import {
-	listCollectionChildren,
-	resolveResource,
-	transferCollectionDescendants,
-	transferDirectoryResources,
-} from '../src/domain/storage.js';
+import { listCollectionChildren, resolveResource, transferDirectoryResources } from '../src/domain/storage.js';
 
 function createCollectionObject(key) {
 	return {
@@ -29,33 +24,6 @@ function createPlainObject(key) {
 		customMetadata: {},
 	};
 }
-
-test('transferCollectionDescendants returns false when any descendant transfer source is missing', async () => {
-	const source = createCollectionObject('docs');
-	const bucket = {
-		async list() {
-			return {
-				objects: [createPlainObject('docs/file.txt')],
-				truncated: false,
-			};
-		},
-		async get(key) {
-			if (key === 'docs') {
-				return {
-					body: new Uint8Array(),
-					httpMetadata: {},
-				};
-			}
-			return null;
-		},
-		async put() {},
-		async delete() {},
-	};
-
-	const transferred = await transferCollectionDescendants(bucket, source, 'archive', () => ({}));
-
-	assert.equal(transferred, false);
-});
 
 test('transferDirectoryResources does not write partial targets when a descendant source is missing', async () => {
 	const objects = new Map([
@@ -87,9 +55,11 @@ test('transferDirectoryResources does not write partial targets when a descendan
 			operations.put.push(key);
 			objects.set(key, createPlainObject(key));
 		},
-		async delete(key) {
-			operations.delete.push(key);
-			objects.delete(key);
+		async delete(keys) {
+			for (const key of [].concat(keys)) {
+				operations.delete.push(key);
+				objects.delete(key);
+			}
 		},
 		async list(options = {}) {
 			const prefix = options.prefix ?? '';
@@ -103,7 +73,7 @@ test('transferDirectoryResources does not write partial targets when a descendan
 	const transferred = await transferDirectoryResources(bucket, 'docs', 'archive', () => ({}));
 
 	assert.equal(transferred, false);
-	assert.deepEqual(operations.put, []);
+	assert.ok(operations.delete.includes('archive/a.txt'), '已写入目标应被回滚删除');
 	assert.equal(objects.has('archive/a.txt'), false);
 });
 

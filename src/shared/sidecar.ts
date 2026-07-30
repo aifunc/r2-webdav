@@ -8,6 +8,7 @@ export function getSidecarPrefix(sidecarConfig: SidecarConfig = DEFAULT_SIDECAR_
 }
 
 export function resolveSidecarConfig(env: Pick<Env, 'SIDECAR_PREFIX'> | { SIDECAR_PREFIX?: string }): SidecarConfig {
-	let sidecarPrefix = env.SIDECAR_PREFIX?.replace(/^\/+|\/+$/g, '') || DEFAULT_SIDECAR_PREFIX;
+	let candidate = env.SIDECAR_PREFIX?.replace(/^\/+|\/+$/g, '');
+	let sidecarPrefix = candidate && candidate.startsWith('.') ? candidate : DEFAULT_SIDECAR_PREFIX;
 	return { sidecarPrefix };
 }

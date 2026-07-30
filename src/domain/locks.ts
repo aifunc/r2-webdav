@@ -7,8 +7,8 @@ import {
 } from '../shared/constants';
 import { escapeXml } from '../shared/escape';
 import { DEFAULT_SIDECAR_CONFIG, getSidecarPrefix } from '../shared/sidecar';
-import { getDirectorySidecarKey, isDirectorySidecarKey, parseDirectorySidecar } from './directories';
-import { decodeResourcePath, getAncestorPaths, getCollectionPrefix } from './path';
+import { getDirectorySidecarKey, isDirectorySidecarKey, readDirectorySidecarState } from './directories';
+import { decodeResourcePath, getAncestorPaths, getCollectionPrefix, getResourceHref } from './path';
 import { listAll } from './storage';
 import type { DirectorySidecar, LockDetails, SidecarConfig } from '../shared/types';
 
@@ -191,30 +191,13 @@ export function hasLockScopeConflict(lockDetails: LockDetails[], requestedScope:
 	return lockDetails.some((lockDetail) => lockDetail.scope === 'exclusive');
 }
 
-async function readDirectorySidecarFromKey(
-	bucket: R2Bucket,
-	sidecarKey: string,
-): Promise<DirectorySidecar | undefined> {
-	let object = await bucket.get(sidecarKey);
-	if (object === null) {
-		return undefined;
-	}
-	return parseDirectorySidecar(await new Response(object.body).text());
-}
-
 async function readDirectorySidecarLockDetails(
 	bucket: R2Bucket,
 	resourcePath: string,
 	sidecarConfig: SidecarConfig,
 ): Promise<{ exists: boolean; locks: LockDetails[] }> {
-	let sidecarKey = getDirectorySidecarKey(resourcePath, sidecarConfig);
-	let object = await bucket.get(sidecarKey);
-	if (object === null) {
-		return { exists: false, locks: [] };
-	}
-	let payload = await new Response(object.body).text();
-	let sidecar = parseDirectorySidecar(payload);
-	return { exists: true, locks: sidecar?.locks ?? [] };
+	let state = await readDirectorySidecarState(bucket, getDirectorySidecarKey(resourcePath, sidecarConfig));
+	return { exists: state.exists, locks: state.sidecar?.locks ?? [] };
 }
 
 export async function readLockState(
@@ -291,6 +274,18 @@ export function getPreservedCustomMetadata(customMetadata: Record<string, string
 	if (lockDetails.length === 0) {
 		return stripLockMetadata(customMetadata);
 	}
+	return withLockMetadata(customMetadata, lockDetails);
+}
+
+export function rewriteLockRoots(
+	customMetadata: Record<string, string> | undefined,
+	targetKey: string,
+	isCollection: boolean,
+): Record<string, string> {
+	let lockDetails = getLockDetails(customMetadata).map((lockDetail) => ({
+		...lockDetail,
+		root: getResourceHref(targetKey, isCollection),
+	}));
 	return withLockMetadata(customMetadata, lockDetails);
 }
 
@@ -469,17 +464,8 @@ function matchEtagConditions(conditions: IfHeaderStateCondition[], resource: R2O
 }
 
 function collectPositiveLockTokens(conditions: IfHeaderStateCondition[]): string[] {
-	if (
-		conditions.some(
-			(condition) =>
-				condition.kind === 'token' && !condition.negated && condition.value.toLowerCase() === 'dav:no-lock',
-		)
-	) {
-		return [];
-	}
-
 	return conditions.flatMap((condition) => {
-		if (condition.kind !== 'token' || condition.negated || condition.value.toLowerCase() === 'dav:no-lock') {
+		if (condition.kind !== 'token' || condition.negated) {
 			return [];
 		}
 
@@ -493,13 +479,14 @@ export function getRequestLockTokensForTarget(
 	requestResource: R2Object | null,
 	targetPath: string,
 	targetResource: R2Object | null,
+	options: { includeDirectTokens?: boolean } = {},
 ): { unsupported: boolean; tokens: string[] } {
 	let conditionLists = parseIfHeader(request.headers.get('If'), request.url);
 	if (conditionLists === null) {
 		return { unsupported: true, tokens: [] };
 	}
 
-	let tokens = getDirectRequestLockTokens(request);
+	let tokens = options.includeDirectTokens === false ? [] : getDirectRequestLockTokens(request);
 	for (const { conditions, tagPath } of conditionLists) {
 		if (
 			conditions.some(
@@ -546,6 +533,7 @@ export async function assertLockPermission(
 	options: { ignoreSharedLocksOnTarget?: boolean } = {},
 ): Promise<Response | null> {
 	let requestResource = resourcePath === '' ? null : await bucket.head(resourcePath);
+	let existingLockTokens = new Set<string>();
 	for (const candidate of getAncestorPaths(resourcePath)) {
 		let [resource, sidecarResult] = await Promise.all([
 			bucket.head(candidate),
@@ -557,6 +545,9 @@ export async function assertLockPermission(
 		let lockDetails = sidecarResult.exists
 			? filterScopedLockDetails(resourcePath, candidate, sidecarResult.locks, options)
 			: getScopedLockDetails(resourcePath, candidate, resource?.customMetadata, options);
+		for (const lockDetail of lockDetails) {
+			existingLockTokens.add(lockDetail.token);
+		}
 		if (lockDetails.length === 0) {
 			continue;
 		}
@@ -567,6 +558,20 @@ export async function assertLockPermission(
 		}
 		if (!hasMatchingLockToken(lockDetails, requestLockTokens.tokens)) {
 			return createLockFailureResponse('locked');
+		}
+	}
+
+	// RFC 4918 §10.4.1: If 头提交的正向锁 token 必须对应一条现存锁，否则该 If 条件为假 → 412。
+	// Lock-Token 头是 UNLOCK 的操作参数而非 If 条件（§9.11），不参与此校验；
+	// 无效 token 由 handleUnlock 经 findMatchingLock 返回 409。
+	let requestLockTokens = getRequestLockTokensForTarget(request, requestResource, resourcePath, requestResource, {
+		includeDirectTokens: false,
+	});
+	if (!requestLockTokens.unsupported) {
+		for (const token of requestLockTokens.tokens) {
+			if (!existingLockTokens.has(token)) {
+				return createLockFailureResponse('preconditionFailed');
+			}
 		}
 	}
 
@@ -611,7 +616,7 @@ export async function assertRecursiveDeletePermission(
 		if (!isDirectorySidecarKey(object.key, sidecarConfig)) {
 			continue;
 		}
-		let sidecar = await readDirectorySidecarFromKey(bucket, object.key);
+		let sidecar = (await readDirectorySidecarState(bucket, object.key)).sidecar;
 		let lockDetails = sidecar?.locks ?? [];
 		if (lockDetails.length === 0) {
 			continue;

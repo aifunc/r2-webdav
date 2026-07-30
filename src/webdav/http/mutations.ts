@@ -10,6 +10,7 @@ import { getDirectorySidecarKey, serializeDirectorySidecar } from '../../domain/
 import { deleteDirectorySidecars, hasCollectionResourceOrImplicit, resolveResource } from '../../domain/storage';
 import { DEFAULT_SIDECAR_CONFIG } from '../../shared/sidecar';
 import type { SidecarConfig } from '../../shared/types';
+import { createdResponse } from '../responses';
 import {
 	assertUnmodifiedSince,
 	buildResourceVersionHeaders,
@@ -17,6 +18,16 @@ import {
 	createTextResponse,
 	ensureParentCollectionResource,
 } from './shared';
+
+async function hasReadableBody(request: Request): Promise<boolean> {
+	let reader = request.body?.getReader();
+	if (reader === undefined) {
+		return false;
+	}
+	let { done } = await reader.read();
+	reader.releaseLock();
+	return !done;
+}
 
 async function deleteListedObjects(bucket: R2Bucket, prefix?: string): Promise<void> {
 	let cursor: string | undefined = undefined;
@@ -49,7 +60,11 @@ export async function handlePut(
 		return lockResponse;
 	}
 
-	let existing = await bucket.head(resourcePath);
+	let resolved = await resolveResource(bucket, resourcePath, sidecarConfig);
+	if (resolved?.isCollection) {
+		return createTextResponse('conflict');
+	}
+	let existing = resolved?.object ?? null;
 	let preconditionResponse = assertUnmodifiedSince(request, existing);
 	if (preconditionResponse !== null) {
 		return preconditionResponse;
@@ -59,8 +74,7 @@ export async function handlePut(
 		return parentResponse;
 	}
 
-	let body = await request.arrayBuffer();
-	let stored = await bucket.put(resourcePath, body, {
+	let stored = await bucket.put(resourcePath, request.body ?? new Uint8Array(), {
 		onlyIf: request.headers,
 		httpMetadata: request.headers,
 		customMetadata: getPreservedCustomMetadata(existing?.customMetadata),
@@ -115,7 +129,8 @@ export async function handleMkcol(
 	bucket: R2Bucket,
 	sidecarConfig: SidecarConfig = DEFAULT_SIDECAR_CONFIG,
 ): Promise<Response> {
-	if ((await request.clone().arrayBuffer()).byteLength > 0) {
+	let declaredBodyLength = request.headers.get('Content-Length');
+	if (declaredBodyLength !== null ? Number(declaredBodyLength) > 0 : await hasReadableBody(request)) {
 		return createTextResponse('unsupportedMediaType');
 	}
 
@@ -137,7 +152,7 @@ export async function handleMkcol(
 
 	await bucket.put(
 		getDirectorySidecarKey(resourcePath, sidecarConfig),
-		serializeDirectorySidecar({ kind: 'directory' }),
+		serializeDirectorySidecar({ kind: 'directory', uploaded: new Date() }),
 	);
-	return new Response('', { status: 201 });
+	return createdResponse(resourcePath, true);
 }

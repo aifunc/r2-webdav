@@ -9,25 +9,25 @@ function createBasicAuthorizationHeader(username, password) {
 	return `Basic ${base64}`;
 }
 
-test('isAuthorized accepts Unicode credentials without throwing', () => {
+test('isAuthorized accepts Unicode credentials without throwing', async () => {
 	let username = '用户';
 	let password = '密碼';
 	let authorizationHeader = createBasicAuthorizationHeader(username, password);
 
-	assert.equal(isAuthorized(authorizationHeader, [{ username, password }]), true);
+	assert.equal(await isAuthorized(authorizationHeader, [{ username, password }]), true);
 });
 
-test('isAuthorized rejects mismatched credentials', () => {
+test('isAuthorized rejects mismatched credentials', async () => {
 	let authorizationHeader = createBasicAuthorizationHeader('user', 'secret');
 
-	assert.equal(isAuthorized(authorizationHeader, [{ username: 'user', password: 'other-secret' }]), false);
+	assert.equal(await isAuthorized(authorizationHeader, [{ username: 'user', password: 'other-secret' }]), false);
 });
 
-test('isAuthorized accepts any configured user from AUTH_USERS', () => {
+test('isAuthorized accepts any configured user from AUTH_USERS', async () => {
 	let authorizationHeader = createBasicAuthorizationHeader('bob', 's3cret');
 
 	assert.equal(
-		isAuthorized(
+		await isAuthorized(
 			authorizationHeader,
 			getAuthorizedUsers({
 				AUTH_USERS: 'alice:pw-1\nbob:s3cret\ncarol:pw-3',
@@ -37,18 +37,18 @@ test('isAuthorized accepts any configured user from AUTH_USERS', () => {
 	);
 });
 
-test('isAuthorized accepts case-insensitive Basic scheme and extra spacing', () => {
+test('isAuthorized accepts case-insensitive Basic scheme and extra spacing', async () => {
 	assert.equal(
-		isAuthorized(`basic   ${Buffer.from('bob:s3cret', 'utf8').toString('base64')}   `, [
+		await isAuthorized(`basic   ${Buffer.from('bob:s3cret', 'utf8').toString('base64')}   `, [
 			{ username: 'bob', password: 's3cret' },
 		]),
 		true,
 	);
 });
 
-test('isAuthorized rejects mixed username and password from different AUTH_USERS entries', () => {
+test('isAuthorized rejects mixed username and password from different AUTH_USERS entries', async () => {
 	assert.equal(
-		isAuthorized(
+		await isAuthorized(
 			createBasicAuthorizationHeader('alice', 's3cret'),
 			getAuthorizedUsers({
 				AUTH_USERS: 'alice:pw-1\nbob:s3cret',
@@ -78,4 +78,26 @@ test('getAuthorizedUsers returns empty array when AUTH_USERS is absent or empty'
 		}),
 		[],
 	);
+});
+
+test('getAuthorizedUsers prefers AUTH_USERS over USERNAME/PASSWORD fallback', () => {
+	let authUsers = getAuthorizedUsers({
+		AUTH_USERS: 'alice:pw-1',
+		USERNAME: 'bob',
+		PASSWORD: 's3cret',
+	});
+	assert.deepStrictEqual(authUsers, [{ username: 'alice', password: 'pw-1' }]);
+});
+
+test('getAuthorizedUsers falls back to USERNAME/PASSWORD when AUTH_USERS is absent', () => {
+	let authUsers = getAuthorizedUsers({
+		USERNAME: 'bob',
+		PASSWORD: 's3cret',
+	});
+	assert.deepStrictEqual(authUsers, [{ username: 'bob', password: 's3cret' }]);
+});
+
+test('getAuthorizedUsers returns empty array when only USERNAME or only PASSWORD is set', () => {
+	assert.deepStrictEqual(getAuthorizedUsers({ USERNAME: 'bob' }), []);
+	assert.deepStrictEqual(getAuthorizedUsers({ PASSWORD: 's3cret' }), []);
 });

@@ -1,5 +1,3 @@
-const BASE64_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
-
 type BasicCredentials = {
 	username: string;
 	password: string;
@@ -16,35 +14,17 @@ function timingSafeEqual(left: Uint8Array, right: Uint8Array): boolean {
 	return mismatch === 0;
 }
 
-function encodeBase64(bytes: Uint8Array): string {
-	let encoded = '';
-
-	for (let index = 0; index < bytes.length; index += 3) {
-		let first = bytes[index];
-		let second = bytes[index + 1];
-		let third = bytes[index + 2];
-		let chunk = (first << 16) | ((second ?? 0) << 8) | (third ?? 0);
-
-		encoded += BASE64_ALPHABET[(chunk >> 18) & 63];
-		encoded += BASE64_ALPHABET[(chunk >> 12) & 63];
-		encoded += second === undefined ? '=' : BASE64_ALPHABET[(chunk >> 6) & 63];
-		encoded += third === undefined ? '=' : BASE64_ALPHABET[chunk & 63];
-	}
-
-	return encoded;
-}
-
-function encodeBasicToken(username: string, password: string): Uint8Array {
-	let encoder = new TextEncoder();
-	return encoder.encode(encodeBase64(encoder.encode(`${username}:${password}`)));
-}
-
-function getAuthorizationToken(authorizationHeader: string): Uint8Array | null {
-	let match = authorizationHeader.match(/^Basic[ \t]+([A-Za-z0-9+/=]+)[ \t]*$/i);
+function decodeBasicCredentials(authorizationHeader: string): string | null {
+	let match = authorizationHeader.match(/^Basic[ \t]+([A-Za-z0-9+/]+=*)[ \t]*$/i);
 	if (match === null) {
 		return null;
 	}
-	return new TextEncoder().encode(match[1]);
+	let normalized = match[1] + '='.repeat((4 - (match[1].length % 4)) % 4);
+	try {
+		return new TextDecoder().decode(Uint8Array.from(atob(normalized), (character) => character.charCodeAt(0)));
+	} catch {
+		return null;
+	}
 }
 
 function parseAuthorizedUsers(authUsers: string | undefined): BasicCredentials[] {
@@ -66,15 +46,44 @@ function parseAuthorizedUsers(authUsers: string | undefined): BasicCredentials[]
 		.filter((entry) => entry.username !== '');
 }
 
-export function getAuthorizedUsers(env: { AUTH_USERS?: string }): BasicCredentials[] {
-	return parseAuthorizedUsers(env.AUTH_USERS);
+let usersCache = new WeakMap<object, BasicCredentials[]>();
+
+export function getAuthorizedUsers(env: {
+	AUTH_USERS?: string;
+	USERNAME?: string;
+	PASSWORD?: string;
+}): BasicCredentials[] {
+	let cached = usersCache.get(env);
+	if (cached !== undefined) {
+		return cached;
+	}
+
+	let authorizedUsers = parseAuthorizedUsers(env.AUTH_USERS);
+	if (authorizedUsers.length === 0 && typeof env.USERNAME === 'string' && typeof env.PASSWORD === 'string') {
+		authorizedUsers = [{ username: env.USERNAME, password: env.PASSWORD }];
+	}
+
+	usersCache.set(env, authorizedUsers);
+	return authorizedUsers;
 }
 
-export function isAuthorized(authorizationHeader: string, authorizedUsers: BasicCredentials[]): boolean {
-	let token = getAuthorizationToken(authorizationHeader);
-	if (token === null) {
+async function sha256Digest(bytes: Uint8Array): Promise<Uint8Array> {
+	return new Uint8Array(await crypto.subtle.digest('SHA-256', bytes));
+}
+
+export async function isAuthorized(authorizationHeader: string, authorizedUsers: BasicCredentials[]): Promise<boolean> {
+	let credentials = decodeBasicCredentials(authorizationHeader);
+	if (credentials === null) {
 		return false;
 	}
 
-	return authorizedUsers.some((entry) => timingSafeEqual(token, encodeBasicToken(entry.username, entry.password)));
+	let encoder = new TextEncoder();
+	let hashedCredentials = await sha256Digest(encoder.encode(credentials));
+	let matched = false;
+	for (const entry of authorizedUsers) {
+		if (timingSafeEqual(hashedCredentials, await sha256Digest(encoder.encode(`${entry.username}:${entry.password}`)))) {
+			matched = true;
+		}
+	}
+	return matched;
 }

@@ -1,4 +1,4 @@
-import { INTERNAL_DELETE_FORWARD_HEADERS } from '../shared/constants';
+import { DAV_CLASS, INTERNAL_DELETE_FORWARD_HEADERS, SUPPORT_METHODS } from '../shared/constants';
 import {
 	getParentPath,
 	getResourceHref,
@@ -27,9 +27,9 @@ export type TransferResource = {
 	object: R2Object | null;
 	isCollection: boolean;
 };
-type ResponseTemplateName = 'badRequest' | 'notFound' | 'conflict' | 'preconditionFailed' | 'locked';
+type ResponseTemplateName = keyof typeof RESPONSE_TEMPLATES;
 
-const RESPONSE_TEMPLATES: Record<ResponseTemplateName, { body: string; status: number }> = {
+const RESPONSE_TEMPLATES = {
 	badRequest: {
 		body: 'Bad Request',
 		status: 400,
@@ -37,6 +37,14 @@ const RESPONSE_TEMPLATES: Record<ResponseTemplateName, { body: string; status: n
 	notFound: {
 		body: 'Not Found',
 		status: 404,
+	},
+	forbidden: {
+		body: 'Forbidden',
+		status: 403,
+	},
+	methodNotAllowed: {
+		body: 'Method Not Allowed',
+		status: 405,
 	},
 	conflict: {
 		body: 'Conflict',
@@ -46,16 +54,71 @@ const RESPONSE_TEMPLATES: Record<ResponseTemplateName, { body: string; status: n
 		body: 'Precondition Failed',
 		status: 412,
 	},
+	payloadTooLarge: {
+		body: 'Payload Too Large',
+		status: 413,
+	},
+	unsupportedMediaType: {
+		body: 'Unsupported Media Type',
+		status: 415,
+	},
 	locked: {
 		body: 'Locked',
 		status: 423,
 	},
-};
+} as const;
 
 export function createTextResponse(templateName: ResponseTemplateName): Response {
 	return new Response(RESPONSE_TEMPLATES[templateName].body, {
 		status: RESPONSE_TEMPLATES[templateName].status,
+		headers:
+			templateName === 'methodNotAllowed'
+				? {
+						Allow: SUPPORT_METHODS.join(', '),
+						DAV: DAV_CLASS,
+					}
+				: undefined,
 	});
+}
+
+const MAX_XML_BODY_BYTES = 1024 * 1024;
+
+export async function readXmlBodyWithLimit(request: Request): Promise<string | null> {
+	let contentLength = Number(request.headers.get('Content-Length'));
+	if (Number.isFinite(contentLength) && contentLength > MAX_XML_BODY_BYTES) {
+		return null;
+	}
+
+	let reader = request.body?.getReader();
+	if (reader === undefined) {
+		let body = await request.text();
+		return new TextEncoder().encode(body).byteLength > MAX_XML_BODY_BYTES ? null : body;
+	}
+
+	let received = 0;
+	let chunks: Uint8Array[] = [];
+	for (;;) {
+		let { done, value } = await reader.read();
+		if (done) {
+			break;
+		}
+		if (value === undefined) {
+			continue;
+		}
+		received += value.byteLength;
+		if (received > MAX_XML_BODY_BYTES) {
+			return null;
+		}
+		chunks.push(value);
+	}
+
+	let bytes = new Uint8Array(received);
+	let offset = 0;
+	for (const chunk of chunks) {
+		bytes.set(chunk, offset);
+		offset += chunk.byteLength;
+	}
+	return new TextDecoder().decode(bytes);
 }
 
 export function xmlResponse(body: string, status: number = 207, headers: HeadersInit = {}): Response {
@@ -151,12 +214,12 @@ export async function transferCollectionOrNotFound(
 	bucket: R2Bucket,
 	resourcePath: string,
 	destination: string,
-	mapMetadata: (object: R2Object) => Record<string, string>,
+	mapMetadata: (object: R2Object, targetKey: string) => Record<string, string>,
 	sidecarConfig: SidecarConfig = DEFAULT_SIDECAR_CONFIG,
 	options: {
 		deleteSource?: boolean;
 		includeDescendants?: boolean;
-		mapSidecar?: (sidecar: DirectorySidecar) => DirectorySidecar;
+		mapSidecar?: (sidecar: DirectorySidecar, destinationResourcePath: string) => DirectorySidecar;
 	} = {},
 ): Promise<Response | null> {
 	let transferred = await transferDirectoryResources(

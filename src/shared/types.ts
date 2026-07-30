@@ -1,6 +1,8 @@
 export interface Env {
 	bucket: R2Bucket;
 	AUTH_USERS?: string;
+	USERNAME?: string;
+	PASSWORD?: string;
 	SIDECAR_PREFIX?: string;
 }
 
@@ -37,6 +39,7 @@ export type DirectorySidecar = {
 	kind: 'directory';
 	props?: DirectorySidecarProps;
 	locks?: LockDetails[];
+	uploaded?: Date;
 };
 
 export type LegacyDirectoryMarker = {

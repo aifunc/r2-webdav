@@ -24,6 +24,20 @@ const OBJECT_RESPONSE_METADATA_HEADERS = [
 	},
 ] as const;
 
+const INLINE_SAFE_CONTENT_TYPES = new Set(['text/plain', 'text/csv', 'application/pdf', 'application/json']);
+const INLINE_SAFE_CONTENT_TYPE_PREFIXES = ['image/', 'audio/', 'video/'];
+
+function isInlineSafeContentType(contentType: string | undefined): boolean {
+	let base = contentType?.split(';')[0]?.trim().toLowerCase();
+	if (base === undefined) {
+		return false;
+	}
+	if (INLINE_SAFE_CONTENT_TYPE_PREFIXES.some((prefix) => base.startsWith(prefix))) {
+		return true;
+	}
+	return INLINE_SAFE_CONTENT_TYPES.has(base);
+}
+
 function isR2ObjectBody(object: R2Object | R2ObjectBody): object is R2ObjectBody {
 	return 'body' in object;
 }
@@ -46,6 +60,13 @@ function buildObjectResponseHeaders(object: R2ObjectBody, rangeOffset: number, r
 		if (value !== undefined) {
 			headers.set(header, value);
 		}
+	}
+
+	if (
+		object.httpMetadata?.contentDisposition === undefined &&
+		!isInlineSafeContentType(object.httpMetadata?.contentType)
+	) {
+		headers.set('Content-Disposition', 'attachment');
 	}
 
 	if (object.httpMetadata?.cacheExpiry) {
@@ -111,11 +132,59 @@ export async function handleHead(
 	bucket: R2Bucket,
 	sidecarConfig: SidecarConfig = DEFAULT_SIDECAR_CONFIG,
 ): Promise<Response> {
-	let response = await handleGet(request, bucket, sidecarConfig);
+	let resourcePath = makeResourcePath(request);
+
+	if (hasTrailingSlashPath(request)) {
+		if (resourcePath !== '') {
+			let resolved = await resolveResource(bucket, resourcePath, sidecarConfig);
+			if (resolved === null || !resolved.isCollection) {
+				return createTextResponse('notFound');
+			}
+		}
+		return new Response(null, {
+			status: 200,
+			headers: { 'Content-Type': 'text/html; charset=utf-8' },
+		});
+	}
+
+	let hasConditionals =
+		request.headers.has('If-None-Match') ||
+		request.headers.has('If-Modified-Since') ||
+		request.headers.has('If-Match') ||
+		request.headers.has('If-Unmodified-Since');
+
+	if (!hasConditionals && !request.headers.has('Range')) {
+		let object = await bucket.head(resourcePath);
+		if (object === null) {
+			return createTextResponse('notFound');
+		}
+		return new Response(null, {
+			status: 200,
+			headers: buildObjectResponseHeaders(object as R2ObjectBody, 0, object.size - 1),
+		});
+	}
+
+	let object = await bucket.get(resourcePath, { onlyIf: request.headers, range: request.headers });
+	if (object === null) {
+		if (request.headers.has('Range')) {
+			let meta = await bucket.head(resourcePath);
+			if (meta !== null) {
+				return new Response(null, { status: 416, headers: { 'Content-Range': `bytes */${meta.size}` } });
+			}
+		}
+		return createTextResponse('notFound');
+	}
+	if (!isR2ObjectBody(object)) {
+		if (request.headers.has('If-None-Match') || request.headers.has('If-Modified-Since')) {
+			return new Response(null, { status: 304, headers: buildResourceVersionHeaders(object) });
+		}
+		return createTextResponse('preconditionFailed');
+	}
+
+	let { rangeOffset, rangeEnd } = calcContentRange(object);
 	return new Response(null, {
-		status: response.status,
-		statusText: response.statusText,
-		headers: response.headers,
+		status: object.range !== undefined ? 206 : 200,
+		headers: buildObjectResponseHeaders(object, rangeOffset, rangeEnd),
 	});
 }
 
@@ -136,9 +205,18 @@ export async function handleGet(
 	});
 
 	if (object === null) {
+		if (request.headers.has('Range')) {
+			let meta = await bucket.head(resourcePath);
+			if (meta !== null) {
+				return new Response(null, { status: 416, headers: { 'Content-Range': `bytes */${meta.size}` } });
+			}
+		}
 		return createTextResponse('notFound');
 	}
 	if (!isR2ObjectBody(object)) {
+		if (request.headers.has('If-None-Match') || request.headers.has('If-Modified-Since')) {
+			return new Response(null, { status: 304, headers: buildResourceVersionHeaders(object) });
+		}
 		return createTextResponse('preconditionFailed');
 	}
 

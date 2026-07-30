@@ -135,8 +135,25 @@ export function renderEmptyPropertyElement(property: DeadProperty): string {
 	return renderPropertyXml(property, '', true);
 }
 
+function hasDavNamespaceDescendant(node: Node): boolean {
+	for (let child = node.firstChild; child !== null; child = child.nextSibling) {
+		if (child.nodeType === child.ELEMENT_NODE) {
+			let element = child as Element;
+			if (element.namespaceURI === DAV_NAMESPACE || hasDavNamespaceDescendant(element)) {
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
 function getElementProperty(element: Element): DeadProperty | null {
 	if (element.prefix && (element.namespaceURI === null || element.namespaceURI === '')) {
+		return null;
+	}
+	// dead property 的 valueXml 会以原始 XML 形式拼回 multistatus 响应；
+	// 拒绝值中包含 DAV: 命名空间的后代元素，防止注入 <response> 等协议层结构（存储型 XML 注入）。
+	if (hasDavNamespaceDescendant(element)) {
 		return null;
 	}
 	return {

@@ -4,6 +4,7 @@ import {
 	determineLockDepth,
 	extractLockOwner,
 	findMatchingLock,
+	getLockDetails,
 	getLockDiscovery,
 	hasLockScopeConflict,
 	normalizeLockToken,
@@ -28,24 +29,11 @@ import type { DirectorySidecar, LockDetails, SidecarConfig } from '../../shared/
 import {
 	getDirectorySidecarKey,
 	legacyMarkerToSidecar,
-	parseDirectorySidecar,
+	readDirectorySidecarState,
 	readLegacyDirectoryMarker,
-	serializeDirectorySidecar,
+	updateDirectorySidecar,
 } from '../../domain/directories';
-import { createTextResponse, xmlResponse } from '../responses';
-
-async function readDirectorySidecarState(
-	bucket: R2Bucket,
-	sidecarKey: string,
-): Promise<{ exists: boolean; sidecar: DirectorySidecar | null }> {
-	let sidecarObject = await bucket.get(sidecarKey);
-	if (sidecarObject === null) {
-		return { exists: false, sidecar: null };
-	}
-	let payload = await new Response(sidecarObject.body).text();
-	let sidecar = parseDirectorySidecar(payload);
-	return { exists: true, sidecar: sidecar ?? { kind: 'directory' } };
-}
+import { createTextResponse, readXmlBodyWithLimit, xmlResponse } from '../responses';
 
 function stripDirectoryMetadata(customMetadata: Record<string, string> | undefined): Record<string, string> {
 	let metadata = stripLockMetadata(customMetadata);
@@ -69,7 +57,10 @@ export async function handleLock(
 	}
 
 	let { timeout, expiresAt } = parseTimeout(request.headers.get('Timeout'));
-	let body = await request.text();
+	let body = await readXmlBodyWithLimit(request);
+	if (body === null) {
+		return createTextResponse('payloadTooLarge');
+	}
 	let isRefreshRequest = body === '';
 	let requestedScope: LockDetails['scope'] = /<shared\b/i.test(body) ? 'shared' : 'exclusive';
 	if (body !== '' && !/<write\b/i.test(body)) {
@@ -122,6 +113,9 @@ export async function handleLock(
 		!currentLocks.some((currentLock) => requestLockTokens.tokens.includes(currentLock.token))
 	) {
 		return createTextResponse('locked');
+	}
+	if (isRefreshRequest && refreshTarget === null) {
+		return createTextResponse('badRequest');
 	}
 
 	if (resource === null) {
@@ -194,29 +188,43 @@ export async function handleLock(
 		updatedLocks = updatedObjectLocks;
 	}
 
+	let writtenLocks = updatedLocks;
 	if (isDirectoryTarget) {
 		if (sidecarKey === null) {
 			return createTextResponse('notFound');
 		}
-		let sidecarState = baseSidecar
-			? { exists: true, sidecar: baseSidecar }
-			: await readDirectorySidecarState(bucket, sidecarKey);
-		if (!sidecarState.exists || sidecarState.sidecar === null) {
-			return createTextResponse('notFound');
-		}
-		let sidecar = sidecarState.sidecar;
-		let updatedSidecar = {
-			...sidecar,
-			locks: updatedSidecarLocks.length > 0 ? updatedSidecarLocks : undefined,
-		};
-		await bucket.put(sidecarKey, serializeDirectorySidecar(updatedSidecar));
-
-		if (resource !== null && isCollectionObject(resource)) {
-			let updatedMetadata = stripDirectoryMetadata(resource.customMetadata);
-			let updated = await rewriteStoredObject(bucket, resource.key, updatedMetadata, resource.httpMetadata);
-			if (!updated) {
+		let writeResponse = await updateDirectorySidecar(bucket, sidecarKey, (currentSidecar, currentExists) => {
+			// 优先使用重读状态做冲突检测；仅当 sidecar 确实不存在时才回退到 baseSidecar
+			// （隐式/legacy 集合的首次 sidecar 化）。否则并发首次 LOCK 会因 baseSidecar
+			// 短路而绕过 etag 重试的重读，后写覆盖先写、破坏排他锁完整性。
+			let base = currentExists ? (currentSidecar ?? { kind: 'directory' as const }) : (baseSidecar ?? undefined);
+			if (base === undefined) {
 				return createTextResponse('notFound');
 			}
+			let locks = base.locks ?? [];
+			if (existingLock === undefined && hasLockScopeConflict(locks, requestedScope)) {
+				return createTextResponse('locked');
+			}
+			let nextLocks = upsertLockDetails(locks, lockDetails, existingLock);
+			writtenLocks = nextLocks;
+			return {
+				...base,
+				locks: nextLocks.length > 0 ? nextLocks : undefined,
+			};
+		});
+		if (writeResponse !== null) {
+			return writeResponse;
+		}
+
+		if (resource !== null && isCollectionObject(resource)) {
+			// sidecar 已写入且为目录元数据真源；legacy marker 清理若因并发改写失败，
+			// 仅残留冗余 marker（sidecar 优先），不应让客户端看到误导性的 404。
+			await rewriteStoredObject(
+				bucket,
+				resource.key,
+				stripDirectoryMetadata(resource.customMetadata),
+				resource.httpMetadata,
+			);
 		}
 	} else {
 		if (resource === null) {
@@ -233,7 +241,7 @@ export async function handleLock(
 	}
 
 	return xmlResponse(
-		`<?xml version="1.0" encoding="utf-8"?>\n<prop xmlns="DAV:"><lockdiscovery>${getLockDiscovery(updatedLocks)}</lockdiscovery></prop>`,
+		`<?xml version="1.0" encoding="utf-8"?>\n<prop xmlns="DAV:"><lockdiscovery>${getLockDiscovery(writtenLocks)}</lockdiscovery></prop>`,
 		existingLock ? 200 : 201,
 		{
 			'Lock-Token': `<urn:uuid:${lockDetails.token}>`,
@@ -254,9 +262,7 @@ export async function handleUnlock(
 	let resourcePath = makeResourcePath(request);
 	let lockState = await readLockState(bucket, resourcePath, sidecarConfig);
 	let resource = lockState.resource;
-	let sidecarKey = lockState.sidecarKey;
 	let sidecarExists = lockState.sidecarExists;
-	let sidecarLocks = lockState.sidecarLocks;
 	let isDirectoryTarget =
 		sidecarExists ||
 		isCollectionObject(resource) ||
@@ -275,56 +281,53 @@ export async function handleUnlock(
 		return lockResponse;
 	}
 
-	let lockDetails = lockState.locks;
 	let normalizedToken = normalizeLockToken(lockToken);
-	if (!lockDetails.some((lockDetail) => lockDetail.token === normalizedToken)) {
+	// 锁由 token 标识（RFC 4918 §9.11），可能在祖先（infinity）而非 request path；按 token 定位实际存储位置移除。
+	let matching = await findMatchingLock(request, bucket, resourcePath, sidecarConfig);
+	if (matching === null) {
 		return createTextResponse('conflict');
 	}
 
-	let baseSidecar: DirectorySidecar | null = null;
-	if (isDirectoryTarget && !sidecarExists) {
-		let legacy = resource ? readLegacyDirectoryMarker(resource.customMetadata) : undefined;
-		baseSidecar = legacy ? legacyMarkerToSidecar(legacy) : { kind: 'directory' };
-		sidecarKey = getDirectorySidecarKey(resourcePath, sidecarConfig);
-		sidecarLocks = baseSidecar.locks ?? [];
-		sidecarExists = true;
-		lockDetails = sidecarLocks;
-	}
-
-	let updatedLocks = lockDetails.filter((lockDetail) => lockDetail.token !== normalizedToken);
-	if (isDirectoryTarget) {
-		if (sidecarKey === null) {
-			return createTextResponse('notFound');
-		}
-		let sidecarState = baseSidecar
-			? { exists: true, sidecar: baseSidecar }
-			: await readDirectorySidecarState(bucket, sidecarKey);
-		if (!sidecarState.exists || sidecarState.sidecar === null) {
-			return createTextResponse('notFound');
-		}
-		let sidecar = sidecarState.sidecar;
-		let updatedSidecar = { ...sidecar, locks: updatedLocks.length > 0 ? updatedLocks : undefined };
-		await bucket.put(sidecarKey, serializeDirectorySidecar(updatedSidecar));
-
-		if (resource !== null && isCollectionObject(resource)) {
-			let updatedMetadata = stripDirectoryMetadata(resource.customMetadata);
-			let updated = await rewriteStoredObject(bucket, resource.key, updatedMetadata, resource.httpMetadata);
-			if (!updated) {
+	if (matching.sidecarKey !== null) {
+		let writeResponse = await updateDirectorySidecar(bucket, matching.sidecarKey, (currentSidecar, currentExists) => {
+			let base = currentExists ? (currentSidecar ?? { kind: 'directory' as const }) : undefined;
+			if (base === undefined) {
 				return createTextResponse('notFound');
 			}
+			let locks = base.locks ?? [];
+			if (!locks.some((lock) => lock.token === normalizedToken)) {
+				return createTextResponse('conflict');
+			}
+			let remaining = locks.filter((lock) => lock.token !== normalizedToken);
+			return { ...base, locks: remaining.length > 0 ? remaining : undefined };
+		});
+		if (writeResponse !== null) {
+			return writeResponse;
+		}
+
+		if (matching.resource !== null && isCollectionObject(matching.resource)) {
+			// 与 handleLock 同理：sidecar 锁已移除且 sidecar 为真源，
+			// legacy marker 清理失败仅残留冗余 marker，不应误报 404。
+			await rewriteStoredObject(
+				bucket,
+				matching.resource.key,
+				stripDirectoryMetadata(matching.resource.customMetadata),
+				matching.resource.httpMetadata,
+			);
 		}
 	} else {
-		let updatedObjectLocks = lockState.objectLocks.filter((lockDetail) => lockDetail.token !== normalizedToken);
-		if (resource !== null && updatedObjectLocks.length !== lockState.objectLocks.length) {
-			let updated = await rewriteStoredObject(
-				bucket,
-				resource.key,
-				withLockMetadata(getPreservedCustomMetadata(resource.customMetadata), updatedObjectLocks),
-			);
-			if (!updated) {
-				return createTextResponse('notFound');
-			}
-		} else if (resource === null) {
+		if (matching.resource === null) {
+			return createTextResponse('notFound');
+		}
+		let preservedMetadata = getPreservedCustomMetadata(matching.resource.customMetadata);
+		let updatedLocks = getLockDetails(preservedMetadata).filter((lock) => lock.token !== normalizedToken);
+		let updated = await rewriteStoredObject(
+			bucket,
+			matching.resource.key,
+			withLockMetadata(preservedMetadata, updatedLocks),
+			matching.resource.httpMetadata,
+		);
+		if (!updated) {
 			return createTextResponse('notFound');
 		}
 	}

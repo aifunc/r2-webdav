@@ -12,6 +12,7 @@ function encodeHrefPath(path: string): string {
 	if (path === '/') {
 		return '/';
 	}
+	// 首段恒为空串（来自前导 `/`），故跳过；其余段逐个编码。
 	return path
 		.split('/')
 		.map((segment, index) => (index === 0 ? segment : encodeURIComponent(segment)))
@@ -26,10 +27,13 @@ export function getResourceHref(key: string, isCollection: boolean): string {
 }
 
 export function decodeResourcePath(pathname: string): string {
-	if (trimTrailingSlash(pathname.slice(1)) === '') {
+	// WHATWG URL 会规范化 `..` 但不折叠连续斜杠；统一折叠，
+	// 避免 `//foo` 产生带前导斜杠的 resourcePath（与 sidecar key 口径不一致）。
+	let normalized = pathname.replace(/\/{2,}/g, '/');
+	if (trimTrailingSlash(normalized.slice(1)) === '') {
 		return '';
 	}
-	return trimTrailingSlash(pathname.slice(1))
+	return trimTrailingSlash(normalized.slice(1))
 		.split('/')
 		.map((segment) => {
 			try {

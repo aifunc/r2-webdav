@@ -3,10 +3,15 @@ import type { DeadProperty } from '../../shared/types';
 import { escapeXml, renderEmptyPropertyElement } from '../xml';
 import { getResourceHref, isCollectionObject } from '../../domain/path';
 
+const COMPUTED_LIVE_PROPERTIES = ['creationdate', 'getcontentlength', 'getetag', 'getlastmodified', 'resourcetype'];
+
 export function isProtectedProperty(propName: string | DeadProperty): boolean {
 	let localPropName = typeof propName === 'string' ? (propName.split(':').pop() ?? propName) : propName.localName;
 	return (
-		LOCK_METADATA_KEYS.includes(localPropName) || localPropName === 'supportedlock' || localPropName === 'lockdiscovery'
+		LOCK_METADATA_KEYS.includes(localPropName) ||
+		COMPUTED_LIVE_PROPERTIES.includes(localPropName) ||
+		localPropName === 'supportedlock' ||
+		localPropName === 'lockdiscovery'
 	);
 }
 

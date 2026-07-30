@@ -5,6 +5,7 @@ import {
 	isDirectorySidecarKey,
 	legacyMarkerToSidecar,
 	parseDirectorySidecar,
+	readDirectorySidecarState,
 	readLegacyDirectoryMarker,
 	serializeDirectorySidecar,
 } from './directories';
@@ -160,28 +161,12 @@ async function hasSidecarDescendants(
 	return false;
 }
 
-async function readDirectorySidecarStateFromKey(
-	bucket: R2Bucket,
-	sidecarKey: string,
-): Promise<{ exists: boolean; sidecar: DirectorySidecar | undefined; uploaded: Date | undefined }> {
-	let object = await bucket.get(sidecarKey);
-	if (object === null) {
-		return { exists: false, sidecar: undefined, uploaded: undefined };
-	}
-	let uploaded = object.uploaded ?? (await bucket.head(sidecarKey))?.uploaded;
-	return {
-		exists: true,
-		sidecar: parseDirectorySidecar(await new Response(object.body).text()),
-		uploaded,
-	};
-}
-
 async function readDirectorySidecar(
 	bucket: R2Bucket,
 	resourcePath: string,
 	sidecarConfig: SidecarConfig,
 ): Promise<{ exists: boolean; sidecar: DirectorySidecar | undefined; uploaded: Date | undefined }> {
-	return readDirectorySidecarStateFromKey(bucket, getDirectorySidecarKey(resourcePath, sidecarConfig));
+	return readDirectorySidecarState(bucket, getDirectorySidecarKey(resourcePath, sidecarConfig));
 }
 
 async function* listDirectorySidecarEntries(
@@ -294,7 +279,6 @@ export async function* listAll(bucket: R2Bucket, prefix: string, isRecursive: bo
 				prefix,
 				delimiter: isRecursive ? undefined : '/',
 				cursor,
-				// @ts-ignore https://developers.cloudflare.com/r2/api/workers/workers-api-reference/#r2listoptions
 				include: ['httpMetadata', 'customMetadata'],
 			},
 			'listAll',
@@ -325,7 +309,6 @@ export async function* listCollectionChildren(
 				prefix,
 				delimiter: '/',
 				cursor,
-				// @ts-ignore https://developers.cloudflare.com/r2/api/workers/workers-api-reference/#r2listoptions
 				include: ['httpMetadata', 'customMetadata'],
 			},
 			'listCollectionChildren',
@@ -351,11 +334,19 @@ export async function* listCollectionChildren(
 		}
 	} while (cursor !== undefined);
 
+	let sidecarChildren: { resourcePath: string; sidecarKey: string }[] = [];
 	for await (let sidecarEntry of listDirectorySidecarChildren(bucket, resourcePath, sidecarConfig)) {
 		if (isReservedWebdavNamespace(sidecarEntry.resourcePath, sidecarConfig)) {
 			continue;
 		}
-		let sidecarResult = await readDirectorySidecarStateFromKey(bucket, sidecarEntry.sidecarKey);
+		sidecarChildren.push(sidecarEntry);
+	}
+	let sidecarStates = await Promise.all(
+		sidecarChildren.map((entry) => readDirectorySidecarState(bucket, entry.sidecarKey)),
+	);
+	for (let index = 0; index < sidecarChildren.length; index++) {
+		let sidecarEntry = sidecarChildren[index];
+		let sidecarResult = sidecarStates[index];
 		if (!sidecarResult.exists) {
 			continue;
 		}
@@ -448,15 +439,6 @@ export async function resolveResource(
 	return null;
 }
 
-export async function hasCollectionResource(bucket: R2Bucket, resourcePath: string): Promise<boolean> {
-	if (resourcePath === '') {
-		return true;
-	}
-
-	let resource = await bucket.head(resourcePath);
-	return isCollectionObject(resource);
-}
-
 export async function hasCollectionResourceOrImplicit(
 	bucket: R2Bucket,
 	resourcePath: string,
@@ -469,14 +451,15 @@ export async function hasCollectionResourceOrImplicit(
 type DirectoryTransferOptions = {
 	deleteSource?: boolean;
 	includeDescendants?: boolean;
-	mapSidecar?: (sidecar: DirectorySidecar) => DirectorySidecar;
+	mapSidecar?: (sidecar: DirectorySidecar, destinationResourcePath: string) => DirectorySidecar;
 };
 
 async function loadDirectorySidecarTransfer(
 	bucket: R2Bucket,
 	sourceKey: string,
 	destinationKey: string,
-	mapSidecar: (sidecar: DirectorySidecar) => DirectorySidecar,
+	mapSidecar: (sidecar: DirectorySidecar, destinationResourcePath: string) => DirectorySidecar,
+	destinationResourcePath: string,
 ): Promise<{ destinationKey: string; sourceKey: string; sidecar: DirectorySidecar } | null> {
 	let source = await bucket.get(sourceKey);
 	if (source === null) {
@@ -491,7 +474,7 @@ async function loadDirectorySidecarTransfer(
 	return {
 		destinationKey,
 		sourceKey,
-		sidecar: mapSidecar(parsed),
+		sidecar: mapSidecar(parsed, destinationResourcePath),
 	};
 }
 
@@ -499,7 +482,7 @@ export async function transferDirectoryResources(
 	bucket: R2Bucket,
 	sourcePath: string,
 	destination: string,
-	mapMetadata: (object: R2Object) => Record<string, string>,
+	mapMetadata: (object: R2Object, targetKey: string) => Record<string, string>,
 	sidecarConfig: SidecarConfig = DEFAULT_SIDECAR_CONFIG,
 	options: DirectoryTransferOptions = {},
 ): Promise<boolean> {
@@ -542,7 +525,10 @@ export async function transferDirectoryResources(
 				continue;
 			}
 			fileTransfers.push({
-				customMetadata: mapMetadata(object),
+				customMetadata: mapMetadata(
+					object,
+					getTransferTargetPath(destination, getCollectionPrefix(sourcePath), object.key),
+				),
 				httpMetadata: object.httpMetadata,
 				sourceKey: object.key,
 				targetKey: getTransferTargetPath(destination, getCollectionPrefix(sourcePath), object.key),
@@ -568,28 +554,17 @@ export async function transferDirectoryResources(
 		}
 	}
 
-	let loadedFileTransfers = await Promise.all(
-		fileTransfers.map(async (entry) => {
-			let source = await bucket.get(entry.sourceKey);
-			return source === null ? null : { entry, source };
-		}),
-	);
-	if (loadedFileTransfers.some((entry) => entry === null)) {
-		return false;
-	}
-
 	let loadedSidecarTransfers = await Promise.all(
-		sidecarEntries.map((entry) =>
-			loadDirectorySidecarTransfer(
+		sidecarEntries.map((entry) => {
+			let destinationResourcePath = getTransferTargetDirectoryPath(sourcePath, destination, entry.resourcePath);
+			return loadDirectorySidecarTransfer(
 				bucket,
 				entry.sidecarKey,
-				getDirectorySidecarKey(
-					getTransferTargetDirectoryPath(sourcePath, destination, entry.resourcePath),
-					sidecarConfig,
-				),
+				getDirectorySidecarKey(destinationResourcePath, sidecarConfig),
 				mapSidecar,
-			),
-		),
+				destinationResourcePath,
+			);
+		}),
 	);
 	if (loadedSidecarTransfers.some((entry) => entry === null)) {
 		return false;
@@ -598,32 +573,45 @@ export async function transferDirectoryResources(
 	let legacyTransfers = legacyMarkers
 		.filter((entry) => !sidecarPaths.has(entry.resourcePath))
 		.map((entry) => ({
-			sidecar: mapSidecar(entry.sidecar),
+			sidecar: mapSidecar(entry.sidecar, getTransferTargetDirectoryPath(sourcePath, destination, entry.resourcePath)),
 			targetPath: getTransferTargetDirectoryPath(sourcePath, destination, entry.resourcePath),
 		}));
 
-	for (const loadedTransfer of loadedFileTransfers) {
-		if (loadedTransfer === null) {
-			return false;
+	let writtenTargetKeys: string[] = [];
+	let completed = false;
+	try {
+		for (const entry of fileTransfers) {
+			let source = await bucket.get(entry.sourceKey);
+			if (source === null) {
+				return false;
+			}
+			await bucket.put(entry.targetKey, source.body, {
+				httpMetadata: entry.httpMetadata ?? source.httpMetadata,
+				customMetadata: entry.customMetadata,
+			});
+			writtenTargetKeys.push(entry.targetKey);
 		}
-		await bucket.put(loadedTransfer.entry.targetKey, loadedTransfer.source.body, {
-			httpMetadata: loadedTransfer.entry.httpMetadata ?? loadedTransfer.source.httpMetadata,
-			customMetadata: loadedTransfer.entry.customMetadata,
-		});
-	}
 
-	for (const loadedTransfer of loadedSidecarTransfers) {
-		if (loadedTransfer === null) {
-			return false;
+		for (const loadedTransfer of loadedSidecarTransfers) {
+			if (loadedTransfer === null) {
+				return false;
+			}
+			await bucket.put(loadedTransfer.destinationKey, serializeDirectorySidecar(loadedTransfer.sidecar));
+			writtenTargetKeys.push(loadedTransfer.destinationKey);
+			if (deleteSource) {
+				deleteKeys.push(loadedTransfer.sourceKey);
+			}
 		}
-		await bucket.put(loadedTransfer.destinationKey, serializeDirectorySidecar(loadedTransfer.sidecar));
-		if (deleteSource) {
-			deleteKeys.push(loadedTransfer.sourceKey);
-		}
-	}
 
-	for (const transfer of legacyTransfers) {
-		await writeDirectorySidecar(bucket, transfer.targetPath, transfer.sidecar, sidecarConfig);
+		for (const transfer of legacyTransfers) {
+			await writeDirectorySidecar(bucket, transfer.targetPath, transfer.sidecar, sidecarConfig);
+			writtenTargetKeys.push(getDirectorySidecarKey(transfer.targetPath, sidecarConfig));
+		}
+		completed = true;
+	} finally {
+		if (!completed && writtenTargetKeys.length > 0) {
+			await bucket.delete(writtenTargetKeys).catch(() => {});
+		}
 	}
 
 	if (deleteSource && deleteKeys.length > 0) {
@@ -665,7 +653,15 @@ async function writeStoredObject(
 	let stored = await bucket.put(targetKey, source.body, {
 		httpMetadata: options.httpMetadata ?? source.httpMetadata,
 		customMetadata: options.customMetadata,
+		// 仅在同 key 重写（rewriteStoredObject）时用 etag 乐观锁防止 TOCTOU；
+		// 跨 key 传输（transferObject / COPY/MOVE）不加条件，否则 R2 会比较
+		// target key 的 etag 与 source etag，几乎永远不匹配，导致操作永久失败。
+		...(sourceKey === targetKey ? { onlyIf: { etagMatches: source.etag } } : {}),
 	});
+
+	if (stored === null) {
+		return null;
+	}
 
 	if (options.deleteSource) {
 		await bucket.delete(sourceKey);
@@ -702,56 +698,4 @@ export async function rewriteStoredObject(
 
 function getTransferTargetPath(destination: string, sourcePrefix: string, sourceKey: string): string {
 	return joinResourcePath(destination, sourceKey.slice(sourcePrefix.length));
-}
-
-export async function transferCollectionDescendants(
-	bucket: R2Bucket,
-	source: R2Object,
-	destination: string,
-	mapMetadata: (object: R2Object) => Record<string, string>,
-	options: { deleteSource?: boolean } = {},
-): Promise<boolean> {
-	let prefix = getCollectionPrefix(source.key);
-	let transfers = [
-		{
-			customMetadata: mapMetadata(source),
-			httpMetadata: source.httpMetadata,
-			sourceKey: source.key,
-			targetKey: getTransferTargetPath(destination, prefix, source.key),
-		},
-	];
-	for await (let object of listAll(bucket, prefix, true)) {
-		transfers.push({
-			customMetadata: mapMetadata(object),
-			httpMetadata: object.httpMetadata,
-			sourceKey: object.key,
-			targetKey: getTransferTargetPath(destination, prefix, object.key),
-		});
-	}
-
-	let loadedTransfers = await Promise.all(
-		transfers.map(async (entry) => {
-			let stored = await bucket.get(entry.sourceKey);
-			return stored === null ? null : { entry, stored };
-		}),
-	);
-	if (loadedTransfers.some((entry) => entry === null)) {
-		return false;
-	}
-
-	for (const loadedTransfer of loadedTransfers) {
-		if (loadedTransfer === null) {
-			return false;
-		}
-		await bucket.put(loadedTransfer.entry.targetKey, loadedTransfer.stored.body, {
-			httpMetadata: loadedTransfer.entry.httpMetadata ?? loadedTransfer.stored.httpMetadata,
-			customMetadata: loadedTransfer.entry.customMetadata,
-		});
-	}
-
-	if (options.deleteSource) {
-		await bucket.delete(transfers.map((entry) => entry.sourceKey));
-	}
-
-	return true;
 }

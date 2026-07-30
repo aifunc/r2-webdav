@@ -76,7 +76,7 @@ function parseDirectoryLocks(value: unknown): LockDetails[] | undefined {
 
 	let locks: LockDetails[] = [];
 	for (const entry of value) {
-		if (isLockDetails(entry)) {
+		if (isLockDetails(entry) && entry.expiresAt > Date.now()) {
 			locks.push({
 				token: entry.token,
 				owner: entry.owner,
@@ -96,6 +96,7 @@ function buildDirectorySidecar(
 	parsed: Record<string, unknown>,
 	props: DirectorySidecar['props'] | undefined,
 	locks: LockDetails[] | undefined,
+	uploaded: Date | undefined,
 ): DirectorySidecar | undefined {
 	if (parsed.kind !== 'directory') {
 		return undefined;
@@ -107,6 +108,9 @@ function buildDirectorySidecar(
 	}
 	if (locks !== undefined) {
 		sidecar.locks = locks;
+	}
+	if (uploaded !== undefined) {
+		sidecar.uploaded = uploaded;
 	}
 	return sidecar;
 }
@@ -121,14 +125,20 @@ export function getDirectorySidecarKey(
 	return `${base}${DIRECTORY_SIDECAR_SUFFIX}`;
 }
 
-export function isReservedWebdavPath(key: string, sidecarConfig: SidecarConfig = DEFAULT_SIDECAR_CONFIG): boolean {
-	let sidecarPrefix = getSidecarPrefix(sidecarConfig);
-	return key === sidecarPrefix || key.startsWith(`${sidecarPrefix}/`);
-}
-
 export function isDirectorySidecarKey(key: string, sidecarConfig: SidecarConfig = DEFAULT_SIDECAR_CONFIG): boolean {
 	let sidecarPrefix = getSidecarPrefix(sidecarConfig);
 	return key.startsWith(`${sidecarPrefix}/`) && key.endsWith(DIRECTORY_SIDECAR_SUFFIX);
+}
+
+function parseDirectoryUploaded(value: unknown): Date | undefined {
+	if (typeof value !== 'string') {
+		return undefined;
+	}
+	let parsed = Date.parse(value);
+	if (!Number.isFinite(parsed)) {
+		return undefined;
+	}
+	return new Date(parsed);
 }
 
 export function parseDirectorySidecar(payload: string): DirectorySidecar | undefined {
@@ -139,7 +149,8 @@ export function parseDirectorySidecar(payload: string): DirectorySidecar | undef
 		}
 		let props = parseDirectoryProps(parsed.props);
 		let locks = parseDirectoryLocks(parsed.locks);
-		return buildDirectorySidecar(parsed, props, locks);
+		let uploaded = parseDirectoryUploaded(parsed.uploaded);
+		return buildDirectorySidecar(parsed, props, locks, uploaded);
 	} catch {
 		return undefined;
 	}
@@ -153,7 +164,55 @@ export function serializeDirectorySidecar(sidecar: DirectorySidecar): string {
 	if (sidecar.locks !== undefined) {
 		payload.locks = sidecar.locks;
 	}
+	if (sidecar.uploaded !== undefined) {
+		payload.uploaded = sidecar.uploaded.toISOString();
+	}
 	return JSON.stringify(payload);
+}
+
+export type DirectorySidecarState = {
+	exists: boolean;
+	sidecar: DirectorySidecar | undefined;
+	etag: string | undefined;
+	uploaded: Date | undefined;
+};
+
+export async function readDirectorySidecarState(bucket: R2Bucket, sidecarKey: string): Promise<DirectorySidecarState> {
+	let object = await bucket.get(sidecarKey);
+	if (object === null) {
+		return { exists: false, sidecar: undefined, etag: undefined, uploaded: undefined };
+	}
+	let sidecar = parseDirectorySidecar(await object.text());
+	return {
+		exists: true,
+		sidecar,
+		etag: object.etag,
+		uploaded: sidecar?.uploaded ?? object.uploaded,
+	};
+}
+
+export async function updateDirectorySidecar(
+	bucket: R2Bucket,
+	sidecarKey: string,
+	update: (sidecar: DirectorySidecar | undefined, exists: boolean) => DirectorySidecar | Response,
+	maxAttempts: number = 3,
+): Promise<Response | null> {
+	for (let attempt = 0; attempt < maxAttempts; attempt++) {
+		let state = await readDirectorySidecarState(bucket, sidecarKey);
+		let updated = update(state.sidecar, state.exists);
+		if (updated instanceof Response) {
+			return updated;
+		}
+		let stored = await bucket.put(
+			sidecarKey,
+			serializeDirectorySidecar(updated),
+			state.etag === undefined ? {} : { onlyIf: { etagMatches: state.etag } },
+		);
+		if (stored !== null) {
+			return null;
+		}
+	}
+	return new Response('Conflict', { status: 409 });
 }
 
 export function readLegacyDirectoryMarker(

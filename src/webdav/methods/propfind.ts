@@ -1,5 +1,6 @@
 import { getResourceHref, makeResourcePath } from '../../domain/path';
 import { listCollectionChildren, listCollectionDescendants, resolveResource } from '../../domain/storage';
+import { PROPFIND_MAX_ENTRIES } from '../../shared/constants';
 import { DEFAULT_SIDECAR_CONFIG } from '../../shared/sidecar';
 import type { DeadProperty, PropfindRequest } from '../../shared/types';
 import type { SidecarConfig } from '../../shared/types';
@@ -14,7 +15,7 @@ import {
 	renderPropertyElement,
 	renderPropstat,
 } from '../xml';
-import { createTextResponse, xmlResponse } from '../responses';
+import { createTextResponse, readXmlBodyWithLimit, xmlResponse } from '../responses';
 import { renderEmptyRequestedProperty } from './property-shared';
 
 type PropfindProperties = {
@@ -99,16 +100,20 @@ async function listPropfindResponses(
 	propfindRequest: PropfindRequest,
 	isRecursive: boolean,
 	sidecarConfig: SidecarConfig,
-): Promise<string[]> {
+	maxEntries: number,
+): Promise<{ responses: string[]; truncated: boolean }> {
 	let responses: string[] = [];
 	let iterator = isRecursive
 		? listCollectionDescendants(bucket, resourcePath, sidecarConfig)
 		: listCollectionChildren(bucket, resourcePath, sidecarConfig);
 	for await (let entry of iterator) {
+		if (responses.length >= maxEntries) {
+			return { responses, truncated: true };
+		}
 		responses.push(generatePropfindResponse(entry, propfindRequest));
 	}
 
-	return responses;
+	return { responses, truncated: false };
 }
 
 async function resolvePropfindDepthResponses(
@@ -117,11 +122,12 @@ async function resolvePropfindDepthResponses(
 	propfindRequest: PropfindRequest,
 	depth: string,
 	sidecarConfig: SidecarConfig,
-): Promise<string[] | null> {
-	let depthHandlers: Record<string, () => Promise<string[]>> = {
-		'0': async () => [],
-		'1': async () => listPropfindResponses(bucket, resourcePath, propfindRequest, false, sidecarConfig),
-		infinity: async () => listPropfindResponses(bucket, resourcePath, propfindRequest, true, sidecarConfig),
+	maxEntries: number,
+): Promise<{ responses: string[]; truncated: boolean } | null> {
+	let depthHandlers: Record<string, () => Promise<{ responses: string[]; truncated: boolean }>> = {
+		'0': async () => ({ responses: [], truncated: false }),
+		'1': async () => listPropfindResponses(bucket, resourcePath, propfindRequest, false, sidecarConfig, maxEntries),
+		infinity: async () => listPropfindResponses(bucket, resourcePath, propfindRequest, true, sidecarConfig, maxEntries),
 	};
 	let depthHandler = depthHandlers[depth];
 	if (depthHandler === undefined) {
@@ -137,7 +143,11 @@ export async function handlePropfind(
 	sidecarConfig: SidecarConfig = DEFAULT_SIDECAR_CONFIG,
 ): Promise<Response> {
 	let resourcePath = makeResourcePath(request);
-	let propfindRequest = parsePropfindRequest(await request.text());
+	let body = await readXmlBodyWithLimit(request);
+	if (body === null) {
+		return createTextResponse('payloadTooLarge');
+	}
+	let propfindRequest = parsePropfindRequest(body);
 	if (propfindRequest === null) {
 		return createTextResponse('badRequest');
 	}
@@ -168,11 +178,15 @@ export async function handlePropfind(
 			propfindRequest,
 			depth,
 			sidecarConfig,
+			PROPFIND_MAX_ENTRIES,
 		);
 		if (depthResponses === null) {
 			return createTextResponse('badRequest');
 		}
-		responses.push(...depthResponses);
+		if (depthResponses.truncated) {
+			return new Response('PROPFIND result exceeds maximum number of entries', { status: 507 });
+		}
+		responses.push(...depthResponses.responses);
 	}
 
 	return xmlResponse(buildMultiStatusXml(responses));
