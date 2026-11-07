@@ -503,6 +503,56 @@ function collectPositiveLockTokens(conditions: IfHeaderStateCondition[]): string
 	});
 }
 
+function formatIfCondition(condition: IfHeaderStateCondition): string {
+	let prefix = condition.negated ? 'Not ' : '';
+	return `${prefix}${condition.kind === 'etag' ? `[${condition.value}]` : `<${condition.value}>`}`;
+}
+
+function isInternalDeleteTargetTag(tagPath: string | null, targetPath: string): boolean {
+	return tagPath !== null && (targetPath === '' || tagPath === targetPath || tagPath.startsWith(`${targetPath}/`));
+}
+
+/**
+ * 内部 DELETE 只继承目标相关的 If 条件与锁 token。
+ * 无标签的 ETag 条件属于源请求（COPY/MOVE 的源资源），内部 DELETE 的
+ * Request-URI 是目标路径；若原样转发，A06 的 If 求值会拿目标 ETag 去匹配
+ * 源 ETag，误报 412。无标签列表因此只保留正向锁 token。
+ * 标签指向目标或目标后代的列表则原样保留，使目标 ETag 与后代锁 token 继续生效。
+ */
+export function buildInternalDeleteIfHeader(
+	ifHeader: string | null,
+	requestUrl: string,
+	targetPath: string,
+): string | null {
+	let conditionLists = parseIfHeader(ifHeader, requestUrl);
+	if (conditionLists === null) {
+		return null;
+	}
+
+	let taggedConditions: string[] = [];
+	let tokens = new Map<string, string>();
+	for (const { conditions, tagPath } of conditionLists) {
+		if (tagPath !== null && isInternalDeleteTargetTag(tagPath, targetPath)) {
+			taggedConditions.push(`<${getResourceHref(tagPath, false)}>(${conditions.map(formatIfCondition).join(' ')})`);
+			continue;
+		}
+		for (const condition of conditions) {
+			if (condition.kind !== 'token' || condition.negated) {
+				continue;
+			}
+			let token = normalizeLockToken(condition.value);
+			if (token === '' || token.toLowerCase() === 'dav:no-lock' || tokens.has(token)) {
+				continue;
+			}
+			tokens.set(token, condition.value);
+		}
+	}
+
+	let tokenConditions = [...tokens.values()].map((token) => `(<${token}>)`);
+	let result = [...taggedConditions, ...tokenConditions].join(' ');
+	return result === '' ? null : result;
+}
+
 export function getRequestLockTokensForTarget(
 	request: Request,
 	requestResource: R2Object | null,

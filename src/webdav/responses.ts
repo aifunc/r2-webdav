@@ -1,4 +1,5 @@
 import { DAV_CLASS, INTERNAL_DELETE_FORWARD_HEADERS, SUPPORT_METHODS } from '../shared/constants';
+import { buildInternalDeleteIfHeader } from '../domain/locks';
 import {
 	getParentPath,
 	getResourceHref,
@@ -312,13 +313,21 @@ export async function loadTransferResource(
 	return validationResponse ?? { resourcePath, object: resource.object, isCollection: resource.isCollection };
 }
 
-export function buildForwardedDeleteHeaders(request: Request): Headers {
+export function buildForwardedDeleteHeaders(request: Request, targetPath: string): Headers {
 	let headers = new Headers();
 	for (const headerName of INTERNAL_DELETE_FORWARD_HEADERS) {
+		if (headerName === 'If') {
+			continue;
+		}
 		let headerValue = request.headers.get(headerName);
 		if (headerValue !== null) {
 			headers.set(headerName, headerValue);
 		}
+	}
+
+	let ifHeader = buildInternalDeleteIfHeader(request.headers.get('If'), request.url, targetPath);
+	if (ifHeader !== null) {
+		headers.set('If', ifHeader);
 	}
 
 	return headers;

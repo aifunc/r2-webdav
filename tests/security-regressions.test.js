@@ -7,7 +7,7 @@ import { decodeResourcePath, InvalidResourcePathError } from '../src/domain/path
 import { handleDelete, handleGet } from '../src/webdav/http/handlers.js';
 import worker from '../src/app/worker.js';
 import { dispatchHandler } from '../src/app/dispatch.js';
-import { acquireResourceMutationGuard } from '../src/domain/locks.js';
+import { acquireResourceMutationGuard, buildInternalDeleteIfHeader } from '../src/domain/locks.js';
 import { handleCopy, handleLock, handleMove, handleProppatch } from '../src/webdav/index.js';
 import {
 	getDeadPropertyKey,
@@ -390,4 +390,73 @@ test('concurrent file LOCK requests produce one success', async () => {
 		});
 	let responses = await Promise.all([handleLock(makeRequest(), bucket), handleLock(makeRequest(), bucket)]);
 	assert.deepEqual(responses.map((response) => response.status).sort(), [201, 423]);
+});
+
+test('COPY evaluates If conditions against the source when overwriting', async () => {
+	let source = createObject('source.txt', { bodyText: 'source' });
+	let destination = createObject('target.txt', { bodyText: 'target' });
+	let bucket = createBucket([source, destination]);
+	let etag = source.httpEtag ?? `"${source.etag}"`;
+	let response = await handleCopy(
+		request('COPY', 'source.txt', {
+			Destination: 'http://example.com/target.txt',
+			If: `([${etag}])`,
+		}),
+		bucket,
+	);
+	assert.equal(response.status, 204);
+});
+
+test('COPY collection evaluates If conditions against the source when overwriting', async () => {
+	let source = createObject('source', {
+		bodyText: '',
+		customMetadata: { resourcetype: '<collection />' },
+	});
+	let destination = createObject('target', {
+		bodyText: '',
+		customMetadata: { resourcetype: '<collection />' },
+	});
+	let bucket = createBucket([source, destination]);
+	let etag = source.httpEtag ?? `"${source.etag}"`;
+	let response = await handleCopy(
+		request('COPY', 'source/', {
+			Destination: 'http://example.com/target/',
+			Depth: '0',
+			If: `([${etag}])`,
+		}),
+		bucket,
+	);
+	assert.equal(response.status, 204);
+});
+
+test('MOVE evaluates If conditions against the source when overwriting', async () => {
+	let source = createObject('source.txt', { bodyText: 'source' });
+	let destination = createObject('target.txt', { bodyText: 'target' });
+	let bucket = createBucket([source, destination]);
+	let etag = source.httpEtag ?? `"${source.etag}"`;
+	let response = await handleMove(
+		request('MOVE', 'source.txt', {
+			Destination: 'http://example.com/target.txt',
+			If: `([${etag}])`,
+		}),
+		bucket,
+	);
+	assert.equal(response.status, 204);
+});
+
+test('internal DELETE forwards only lock tokens from If', () => {
+	assert.equal(
+		buildInternalDeleteIfHeader('(<urn:uuid:token-1>) (["etag-1"])', 'http://example.com/source', 'target'),
+		'(<urn:uuid:token-1>)',
+	);
+	assert.equal(buildInternalDeleteIfHeader('(["etag-1"])', 'http://example.com/source', 'target'), null);
+	assert.equal(buildInternalDeleteIfHeader(null, 'http://example.com/source', 'target'), null);
+});
+
+test('internal DELETE preserves target-tagged If conditions', () => {
+	assert.equal(
+		buildInternalDeleteIfHeader('</target> (["target-etag"])', 'http://example.com/source', 'target'),
+		'</target>(["target-etag"])',
+	);
+	assert.equal(buildInternalDeleteIfHeader('</source> (["source-etag"])', 'http://example.com/source', 'target'), null);
 });

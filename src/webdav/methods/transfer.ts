@@ -92,14 +92,11 @@ export async function handleCopy(
 	}
 
 	if (resource.isCollection && destinationExists) {
-		// 内部 DELETE 转发原始 If/Lock-Token 头。
-		// tagged If 条件引用源路径，在内部 DELETE 的目标 URL 下可能不匹配——
-		// 这是已知限制：若目标集合后代被其他客户端锁定且 token 仅出现在 tagged If 中，
-		// DELETE 会返回 423，整体操作失败。这属于正确行为（不应静默删除他人锁定资源）。
+		// 内部 DELETE 继承目标相关 If 条件与锁 token；源 ETag 条件由外层校验。
 		let deleteResponse = await handleDelete(
 			new Request(new URL(destinationTarget.header), {
 				method: 'DELETE',
-				headers: buildForwardedDeleteHeaders(request),
+				headers: buildForwardedDeleteHeaders(request, destinationTarget.path),
 			}),
 			bucket,
 			sidecarConfig,
@@ -228,11 +225,11 @@ export async function handleMove(
 	}
 
 	if (destinationExists) {
-		// 见 handleCopy 中同段注释：内部 DELETE 转发原始锁头，tagged If 可能不匹配目标路径。
+		// 见 handleCopy 中同段注释：内部 DELETE 只继承目标相关条件。
 		let deleteResponse = await handleDelete(
 			new Request(new URL(destinationTarget.header), {
 				method: 'DELETE',
-				headers: buildForwardedDeleteHeaders(request),
+				headers: buildForwardedDeleteHeaders(request, destinationTarget.path),
 			}),
 			bucket,
 			sidecarConfig,
