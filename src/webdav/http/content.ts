@@ -63,7 +63,12 @@ function isR2ObjectBody(object: R2Object | R2ObjectBody): object is R2ObjectBody
 	return 'body' in object;
 }
 
-function buildObjectResponseHeaders(object: R2ObjectBody, rangeOffset: number, rangeEnd: number): Headers {
+function buildObjectResponseHeaders(
+	object: R2ObjectBody,
+	rangeOffset: number,
+	rangeEnd: number,
+	partial: boolean,
+): Headers {
 	let contentLength = rangeEnd - rangeOffset + 1;
 	let headers = new Headers({
 		'Accept-Ranges': 'bytes',
@@ -72,7 +77,7 @@ function buildObjectResponseHeaders(object: R2ObjectBody, rangeOffset: number, r
 	});
 	buildResourceVersionHeaders(object).forEach((value, name) => headers.set(name, value));
 
-	if (object.range !== undefined) {
+	if (partial) {
 		headers.set('Content-Range', `bytes ${rangeOffset}-${rangeEnd}/${object.size}`);
 	}
 
@@ -188,7 +193,7 @@ export async function handleHead(
 		}
 		return new Response(null, {
 			status: 200,
-			headers: buildObjectResponseHeaders(object as R2ObjectBody, 0, object.size - 1),
+			headers: buildObjectResponseHeaders(object as R2ObjectBody, 0, object.size - 1, false),
 		});
 	}
 
@@ -209,10 +214,11 @@ export async function handleHead(
 		return createTextResponse('preconditionFailed');
 	}
 
+	let partial = request.headers.has('Range') && object.range !== undefined;
 	let { rangeOffset, rangeEnd } = calcContentRange(object);
 	return new Response(null, {
-		status: object.range !== undefined ? 206 : 200,
-		headers: buildObjectResponseHeaders(object, rangeOffset, rangeEnd),
+		status: partial ? 206 : 200,
+		headers: buildObjectResponseHeaders(object, rangeOffset, rangeEnd, partial),
 	});
 }
 
@@ -248,9 +254,10 @@ export async function handleGet(
 		return createTextResponse('preconditionFailed');
 	}
 
+	let partial = request.headers.has('Range') && object.range !== undefined;
 	let { rangeOffset, rangeEnd } = calcContentRange(object);
 	return new Response(object.body, {
-		status: object.range !== undefined ? 206 : 200,
-		headers: buildObjectResponseHeaders(object, rangeOffset, rangeEnd),
+		status: partial ? 206 : 200,
+		headers: buildObjectResponseHeaders(object, rangeOffset, rangeEnd, partial),
 	});
 }

@@ -27,9 +27,12 @@ function buildDavHeaders(): HeadersInit {
 }
 
 function optionsResponse(): Response {
+	// RFC 9110 §9.3.7: a successful OPTIONS response should be 200 with
+	// Content-Length: 0. Some WebDAV clients (e.g. webdav_client 1.2.x used by
+	// Bettbox) reject 204 before attempting PUT, so keep this at 200.
 	return new Response(null, {
-		status: 204,
-		headers: buildDavHeaders(),
+		status: 200,
+		headers: { ...buildDavHeaders(), 'Content-Length': '0' },
 	});
 }
 

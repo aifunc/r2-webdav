@@ -52,7 +52,7 @@
 | A11  | 已修复                | `isDocumentElementNamed` 检查 `documentElement !== null`，无根 XML 由入口作为无效请求处理，不再抛未捕获异常。                                                                                                                                                                                                                                                                                                                                                       |
 | A12  | 已修复（升级后 0 条） | Wrangler 升至 **4.158.0**，带入 Miniflare 5.20261104.0-beta、Undici 7.30.1、sharp 0.35.5；隔离 audit 0。unit/typecheck/clean `npm ci`/dev smoke 通过；Miniflare 5 beta 兼容性仍属残余风险，未跑 litmus。                                                                                                                                                                                                                                                            |
 
-验证结果：`npm run test:unit` **180/180 通过**（新增 38 条安全回归），`npx tsc --noEmit` 通过；对修改的源码、测试、配置和四份文档执行 Prettier check 通过。修复后复现脚本确认大小写、无效 Depth 保留目标、MOVE 子树锁、并发文件/目录锁、If/If-Match、prefixed LOCK、rootless XML、PROPPATCH 顺序、SVG/HTML 附件化等行为均已改变；并发文件锁与主要变更方法由 Durable Object 守卫串行化，本地 dev 已验证根路径 LOCK 对子资源 PUT 返回 423、并发文件 LOCK 为一个 201 加一个 423；新增回归还覆盖缺失 DO binding 时写请求 503，以及超深 XML 被拒绝。绕开 dispatch 的路径仍按上表保留边界。
+验证结果：`npm run test:unit` **183/183 通过**（新增 41 条安全回归），`npx tsc --noEmit` 通过；对修改的源码、测试、配置和四份文档执行 Prettier check 通过。修复后复现脚本确认大小写、无效 Depth 保留目标、MOVE 子树锁、并发文件/目录锁、If/If-Match、prefixed LOCK、rootless XML、PROPPATCH 顺序、SVG/HTML 附件化等行为均已改变；并发文件锁与主要变更方法由 Durable Object 守卫串行化，本地 dev 已验证根路径 LOCK 对子资源 PUT 返回 423、并发文件 LOCK 为一个 201 加一个 423；新增回归还覆盖缺失 DO binding 时写请求 503，以及超深 XML 被拒绝。绕开 dispatch 的路径仍按上表保留边界。
 
 ## 重新审计：修复引入的回归（2026-11-07）
 
@@ -60,7 +60,7 @@
 
 - **内部 DELETE 继承源 ETag**：COPY 覆盖集合、MOVE 覆盖文件时，`transfer.ts` 会先对目标调用 `handleDelete`，并转发源请求头。原实现把 `If` 原样转发；A06 的 `evaluateIfHeaderConditions` 在内部 DELETE 中按目标 URL 求值，源 ETag 被拿去匹配目标 ETag，导致带有效源 `If` 的 COPY collection / MOVE file 返回 412（应为 204）。
 - **修复**：新增 `buildInternalDeleteIfHeader(ifHeader, requestUrl, targetPath)`。无标签列表只保留正向锁 token（源 ETag 已由外层校验）；标签指向目标或目标后代的列表原样保留，使目标 ETag、后代锁 token 继续生效；`buildForwardedDeleteHeaders` 使用过滤后的 `If`，并继续转发 `Lock-Token`。
-- **回归覆盖**：`COPY collection evaluates If conditions against the source when overwriting`、`MOVE evaluates If conditions against the source when overwriting`、`internal DELETE forwards only lock tokens from If`、`internal DELETE preserves target-tagged If conditions`。复测 **180/180** 通过，`tsc`/Prettier 通过。
+- **回归覆盖**：`COPY collection evaluates If conditions against the source when overwriting`、`MOVE evaluates If conditions against the source when overwriting`、`internal DELETE forwards only lock tokens from If`、`internal DELETE preserves target-tagged If conditions`。复测 **183/183** 通过，`tsc`/Prettier 通过。
 
 本轮确认的 A06 回归已修复；随后继续修复了上一轮列出的可修残余：
 
@@ -107,6 +107,16 @@
 
 **序列化防护已启用：** `src/webdav/xml.ts` 的 `serializeNodeChildren` 现在通过 `XMLSerializer.serializeToString(child, false, undefined, { requireWellFormed: true })` 序列化；遇到非法 PI target、DocType name 或其他不合规节点时返回 `null`，PROPPATCH/LOCK 解析随即将请求判为无效，而不是把原始节点拼回响应。回归覆盖 `<?xml?>` 非法 PI 被拒绝、合法 `<?xml-stylesheet?>` 仍可通过。**修复状态：** 已升级到 0.8.15、更新锁文件并启用该选项；0.9.12 因对象形式 `errorHandler` 兼容问题未采用。解析后的结构预算已加入 `src/webdav/xml.ts`：最多 20,000 个节点、元素嵌套深度 64、属性总数 5,000；超限请求按无效 XML 拒绝。该限制发生在解析之后，不能替代解析器自身的复杂度修复，但可阻止超大结构进入后续遍历/序列化。旧 metadata 的 dead property 在读取时也会重新解析 `valueXml` 并拒绝 DAV 命名空间后代；但这仍不等于已证明所有历史属性名/值组合都安全，不能替代对旧数据的迁移清洗。
 
+### 协议兼容性修复（生产排查，2026-11-07）
+
+用 Bettbox（Dart `webdav_client` 1.2.2）连接生产实例时，客户端在 `OPTIONS` 之后直接失败，未发出 PUT。检查客户端源码确认它在 `wdWriteWithBytes` / `wdReadWithBytes` / `ping` 中要求 `OPTIONS` 返回 **200**，而本服务返回 **204**；同时发现两个独立的协议正确性问题：
+
+- `src/app/dispatch.ts` 的 `optionsResponse()` 改为 **200** + `Content-Length: 0`（RFC 9110 §9.3.7 的常规形态），CORS 预检仍返回 2xx 和原有 CORS 头；
+- 仅由目录 sidecar 合成的集合对象没有 `etag`，PROPFIND 曾因此输出 `<getetag>"undefined"</getetag>`；`src/webdav/xml.ts` 的 `getetag` 现在只在 `etag` 为字符串时输出，合成集合不再伪造 ETag；
+- `src/webdav/http/content.ts` 在客户端未发送 `Range` 时也会因为 R2 返回 `object.range` 而回 **206**；现在只有请求带 `Range` 才返回 206/`Content-Range`，完整下载恢复为 **200**。
+
+本地 dev 复测：`OPTIONS /` 200、`MKCOL /Bettbox/` 201/405、PROPFIND 无 `undefined`、PUT 201、无 Range 的 GET 200 且字节一致、带 Range 的 GET 206。该问题与安全边界无关，但会阻断严格客户端的上传与恢复。
+
 ## A02：参数错误也会永久删除目标数据
 
 `handleCopy` 在 `transfer.ts:76` 开始删除已有目标集合，直到 `:95` 才校验 Depth；`handleMove` 对应为 `:199` 先删除，`:237` 后校验。
@@ -148,7 +158,7 @@
 
 **建议：** 缺失记录使用条件创建，存在记录使用能代表锁状态变化的版本做条件更新。将文件锁状态放入具有独立版本的记录，或通过 Durable Object 等方式串行化同一资源/层级的锁状态；不要把文件内容 ETag 当作锁元数据版本。应同时验证并发 LOCK、UNLOCK、PUT 与 PROPPATCH。
 
-**修复状态：** 目录 sidecar 首次写已改为 `onlyIf: { etagDoesNotMatch: '*' }`。并发锁与跨方法写操作改由 `src/domain/mutation-guard.ts` 的 `MutationGuardDurableObject` 协调：所有 Worker 实例通过 `idFromName('global')` 访问同一 DO，`acquire` 在 `blockConcurrencyWhile` 中清理过期项并原子检查 shared/exclusive 冲突，`release` 按 token 删除；目标路径取 exclusive，祖先（含根路径）取 shared，因此根路径 LOCK 会阻止子资源 PUT/DELETE，同资源/父子资源冲突返回 423，不同资源可并行。LOCK/UNLOCK 与 dispatch 中的 PUT/DELETE/MKCOL/PROPPATCH/COPY/MOVE 共用该守卫；Worker 层绑定缺失时写请求返回 503；只有直接调用 handler 的测试使用 R2 CAS 回退。DO 仍使用 SQLite-backed 存储的 key-value API，但把单个 `guards` 数组改为 `guard:<token>` 分键记录，避免单 value 超过 128 KiB；租约 120 秒，Worker 每 30 秒 POST `/renew` 续期，容量上限为 256 个活动 token、4096 条记录，单请求最多 1024 条路径、路径字符预算 32 KiB，超限返回 503。本地 dev 已验证根 LOCK 201 → 子资源 PUT 423 → UNLOCK 204 → PUT 204，DO 测试和全量单测 `180/180` 通过。残余是续期连续失败/DO 驱逐后的旧持有者、绕开 dispatch 直接调用 handler、单实例吞吐，以及 R2 带外写入；DO 串行化不是存储级事务。30 秒心跳目前由 DO `/renew` 单测和普通本地 smoke 覆盖，尚未用超过 30 秒的实际 PUT/COPY 做端到端续期验证。`isLost()` 已通过 guard-aware bucket 在每次 `put`/`delete` 前检查，丢失后返回 503；这能阻止丢失后的新写入，但不能撤销已经提交的单个 R2 操作。
+**修复状态：** 目录 sidecar 首次写已改为 `onlyIf: { etagDoesNotMatch: '*' }`。并发锁与跨方法写操作改由 `src/domain/mutation-guard.ts` 的 `MutationGuardDurableObject` 协调：所有 Worker 实例通过 `idFromName('global')` 访问同一 DO，`acquire` 在 `blockConcurrencyWhile` 中清理过期项并原子检查 shared/exclusive 冲突，`release` 按 token 删除；目标路径取 exclusive，祖先（含根路径）取 shared，因此根路径 LOCK 会阻止子资源 PUT/DELETE，同资源/父子资源冲突返回 423，不同资源可并行。LOCK/UNLOCK 与 dispatch 中的 PUT/DELETE/MKCOL/PROPPATCH/COPY/MOVE 共用该守卫；Worker 层绑定缺失时写请求返回 503；只有直接调用 handler 的测试使用 R2 CAS 回退。DO 仍使用 SQLite-backed 存储的 key-value API，但把单个 `guards` 数组改为 `guard:<token>` 分键记录，避免单 value 超过 128 KiB；租约 120 秒，Worker 每 30 秒 POST `/renew` 续期，容量上限为 256 个活动 token、4096 条记录，单请求最多 1024 条路径、路径字符预算 32 KiB，超限返回 503。本地 dev 已验证根 LOCK 201 → 子资源 PUT 423 → UNLOCK 204 → PUT 204，DO 测试和全量单测 `183/183` 通过。残余是续期连续失败/DO 驱逐后的旧持有者、绕开 dispatch 直接调用 handler、单实例吞吐，以及 R2 带外写入；DO 串行化不是存储级事务。30 秒心跳目前由 DO `/renew` 单测和普通本地 smoke 覆盖，尚未用超过 30 秒的实际 PUT/COPY 做端到端续期验证。`isLost()` 已通过 guard-aware bucket 在每次 `put`/`delete` 前检查，丢失后返回 503；这能阻止丢失后的新写入，但不能撤销已经提交的单个 R2 操作。
 
 ## A06：失效的版本条件未阻止修改
 
@@ -208,7 +218,7 @@
 - **bundle 单列：** Wrangler 的发布说明涉及已打包组件的修复，锁文件不按内嵌模块逐项列出。升级前曾在旧 `node_modules/wrangler/wrangler-dist/cli.js` 中读到内嵌版本（例如 `yaml@2.8.1`、`minimatch@5.1.6`、`brace-expansion@2.0.1`），这些组件也存在版本范围命中；4.158.0 的 bundle 内容已改变，仍需按新 CLI 复核，不能把旧读取结果或 npm 的 36 条当成完整清单，也不能假设升级 CLI 就一定已覆盖全部内嵌依赖。
 - **workerd：** 官方公告中的 [GHSA-8vx6-69vg-c46f](https://github.com/cloudflare/workerd/security/advisories/GHSA-8vx6-69vg-c46f)（CVE-2023-2512）影响 `<1.20230419.0`，当前锁定版本早已超出，且官方说明在 Workers 资源限制下从未可利用；不把它算作当前未修复项。开发链补核报告另列该系统公告中与本项目版本无关或已修复的其余条目。
 
-**升级结果（2026-11-07）：** 已将 `wrangler` 升至 **4.158.0**，锁文件带入 `miniflare 5.20261104.0-beta`、`undici 7.30.1`、`sharp 0.35.5`、`workerd 1.20261104.1`、`esbuild 0.28.2`。`npm ci` 从干净安装成功，`npx tsc --noEmit` 通过，`npm run test:unit` **180/180** 通过，本地 `wrangler dev` 的 `PROPFIND / Depth:0` 返回 207；升级后隔离 `npm audit --package-lock-only` 为 **exit 0、0 条**。这消除的是 npm 可见的开发链公告，不等于 bundle 内嵌模块和所有上游代码已被证明无风险。
+**升级结果（2026-11-07）：** 已将 `wrangler` 升至 **4.158.0**，锁文件带入 `miniflare 5.20261104.0-beta`、`undici 7.30.1`、`sharp 0.35.5`、`workerd 1.20261104.1`、`esbuild 0.28.2`。`npm ci` 从干净安装成功，`npx tsc --noEmit` 通过，`npm run test:unit` **183/183** 通过，本地 `wrangler dev` 的 `PROPFIND / Depth:0` 返回 207；升级后隔离 `npm audit --package-lock-only` 为 **exit 0、0 条**。这消除的是 npm 可见的开发链公告，不等于 bundle 内嵌模块和所有上游代码已被证明无风险。
 
 **残余边界：** Miniflare 5 仍是 beta，Wrangler 4.158.0 的兼容性尚未经过 litmus 和长时间运行验证；bundle 内嵌组件仍需按实际 4.158.0 CLI 重新核对，不能把 npm 0 条当成完整清单。升级前 26 条与升级后 0 条均保留为历史对照。
 
@@ -224,14 +234,14 @@
 
 | 验证                                                  | 结果                                                                                                                                                                                                                                |
 | ----------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `npm run test:unit`                                   | 修复前 **142/142 通过**；修复后 **180/180 通过**（新增 38 条安全回归）                                                                                                                                                              |
+| `npm run test:unit`                                   | 修复前 **142/142 通过**；修复后 **183/183 通过**（新增 41 条安全回归）                                                                                                                                                              |
 | `npx tsc --noEmit`                                    | 通过                                                                                                                                                                                                                                |
 | `npm run check`（全量）                               | 修复前 Prettier 因原有未跟踪 `.agents/`、`.forge/` 和 `skills-lock.json` 共 23 个文件失败；本次对修改文件单独 check 通过                                                                                                            |
 | 对 Git 已跟踪的 TS/JS/JSON/Markdown 做 Prettier check | **通过**，用于定位全量格式失败的来源                                                                                                                                                                                                |
 | 只读 `npm audit`（网络恢复后两次）                    | exit 1；**5 个 high 包条目、36 条独立公告**，是漏洞结果，不是执行错误                                                                                                                                                               |
 | 修复后隔离 `npm audit`（升级 Wrangler 前）            | exit 1；xmldom 已消失，仍为 **4 个 high 包条目、26 条开发链公告**                                                                                                                                                                   |
 | 升级 Wrangler 4.158.0 后隔离 `npm audit`              | **exit 0；0 条公告**；Miniflare 5 beta 仍需兼容性验证                                                                                                                                                                               |
-| `npm ci` 干净安装 + unit/typecheck + dev smoke        | 通过；180/180、tsc 通过、`PROPFIND / Depth:0` 返回 207                                                                                                                                                                              |
+| `npm ci` 干净安装 + unit/typecheck + dev smoke        | 通过；183/183、tsc 通过、`PROPFIND / Depth:0` 返回 207                                                                                                                                                                              |
 | `main-repro.mjs`                                      | 通过；鉴权入口下条件请求、内容响应、文件锁及路径别名重现                                                                                                                                                                            |
 | `reviewer-repro.mjs` / `post-fix-repro.mjs`           | 初版通过并重现错误；修复后版本验证 Depth、子树锁、If、LOCK、PROPPATCH 等新行为                                                                                                                                                      |
 | `xml-complexity-repro.mjs`                            | 通过；128 MiB 堆上限下受控性能测量                                                                                                                                                                                                  |

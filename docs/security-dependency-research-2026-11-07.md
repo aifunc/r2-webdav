@@ -35,7 +35,7 @@ env -u NODE_OPTIONS -u NPM_TOKEN -u NODE_AUTH_TOKEN \
 
 最新普通审计保存为 `.tmp/security-audit/npm-audit-online-2026-11-07.json`，SHA256 `4cbd8deddebfa387a98cd68ca0ab58a9fd491f639abdb6fbc16b7b20081e3fe0`；独立 lockfile 审计保存为 `.tmp/security-audit/npm-audit-online-lock-only-2026-11-07.json`，SHA256 `a51792850f1808b07eb7e09c2bc080260c155216ab88f8162df58915268d0851`。只升 xmldom 后的隔离审计为 `.tmp/security-audit/npm-audit-post-fix-2026-11-07.json`（4 包、26 条，SHA256 `90910300e845fd74366975f989d84e3561a35b9cc4fe2625bf4dbb81c9220412`）；Wrangler 4.158.0 升级后的隔离审计为 `.tmp/security-audit/npm-audit-wrangler-upgrade-2026-11-07.json`（22 行，SHA256 `4b1f5dc8672b8c30f077bec9ffba09fd8ecd0798d16dc9b4c946877aec8abdd3`，0 条）。10+23+3 是升级前独立公告数；Miniflare/Wrangler 的传导条目不重复计数。审计仅向 npm registry 发送依赖名称/版本信息，不发送项目源码或应用凭据。
 
-补核研究阶段没有运行源码回归测试：它不改变实现，目标是静态依赖/供应链研究，当时 `git diff --exit-code -- package.json package-lock.json wrangler.toml src .github scripts` 无差异。后续修复实施独立修改了源码、测试、xmldom、Wrangler 和锁文件，并运行 `npm ci`、`npm run test:unit`（180/180）、`npx tsc --noEmit`、本地 dev smoke 及修改文件的 Prettier check；这些结果见主审计报告的“修复实施状态”，不混入补核研究的静态结论。
+补核研究阶段没有运行源码回归测试：它不改变实现，目标是静态依赖/供应链研究，当时 `git diff --exit-code -- package.json package-lock.json wrangler.toml src .github scripts` 无差异。后续修复实施独立修改了源码、测试、xmldom、Wrangler 和锁文件，并运行 `npm ci`、`npm run test:unit`（183/183）、`npx tsc --noEmit`、本地 dev smoke 及修改文件的 Prettier check；这些结果见主审计报告的“修复实施状态”，不混入补核研究的静态结论。
 
 ## 实际版本与依赖链
 

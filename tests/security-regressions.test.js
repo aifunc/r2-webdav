@@ -4,7 +4,7 @@ import { test } from 'node:test';
 
 import { parseDirectorySidecar, serializeDirectorySidecar, updateDirectorySidecar } from '../src/domain/directories.js';
 import { decodeResourcePath, InvalidResourcePathError } from '../src/domain/path.js';
-import { handleDelete, handleGet } from '../src/webdav/http/handlers.js';
+import { handleDelete, handleGet, handleMkcol } from '../src/webdav/http/handlers.js';
 import worker from '../src/app/worker.js';
 import { dispatchHandler } from '../src/app/dispatch.js';
 import {
@@ -13,7 +13,7 @@ import {
 	createGuardAwareBucket,
 	LockMutationGuardLostError,
 } from '../src/domain/locks.js';
-import { handleCopy, handleLock, handleMove, handleProppatch } from '../src/webdav/index.js';
+import { handleCopy, handleLock, handleMove, handlePropfind, handleProppatch } from '../src/webdav/index.js';
 import {
 	getDeadProperties,
 	getDeadPropertyKey,
@@ -567,4 +567,62 @@ test('internal DELETE preserves target-tagged If conditions', () => {
 		'</target>(["target-etag"])',
 	);
 	assert.equal(buildInternalDeleteIfHeader('</source> (["source-etag"])', 'http://example.com/source', 'target'), null);
+});
+
+test('OPTIONS returns 200 so strict WebDAV clients can proceed', async () => {
+	let response = await worker.fetch(request('OPTIONS', 'Bettbox/', { Origin: 'https://example.com' }), {
+		bucket: createBucket(),
+		AUTH_USERS: 'auditor:secret',
+	});
+
+	assert.equal(response.status, 200);
+	assert.equal(response.headers.get('Content-Length'), '0');
+	assert.equal(response.headers.get('DAV'), '1, 2');
+	assert.match(response.headers.get('Allow') ?? '', /MKCOL/);
+	assert.equal(response.headers.get('Access-Control-Allow-Origin'), 'https://example.com');
+});
+
+test('collections without a stored object do not advertise a bogus ETag', async () => {
+	let bucket = createBucket();
+	let created = await handleMkcol(request('MKCOL', 'Bettbox/'), bucket);
+	assert.equal(created.status, 201);
+
+	let response = await handlePropfind(
+		request(
+			'PROPFIND',
+			'Bettbox/',
+			{ Depth: '0' },
+			'<d:propfind xmlns:d="DAV:"><d:prop><d:getetag/></d:prop></d:propfind>',
+		),
+		bucket,
+	);
+	assert.equal(response.status, 207);
+
+	let body = await response.text();
+	assert.doesNotMatch(body, /undefined/);
+});
+
+test('GET without a Range header returns the full body with 200', async () => {
+	let body = new TextEncoder().encode('backup-bytes');
+	let bucket = {
+		async get() {
+			return {
+				key: 'backup.zip',
+				size: body.byteLength,
+				etag: 'abc',
+				httpEtag: '"abc"',
+				uploaded: new Date('2024-01-01T00:00:00.000Z'),
+				httpMetadata: { contentType: 'application/zip' },
+				customMetadata: {},
+				range: { offset: 0, length: body.byteLength },
+				body: new Response(body).body,
+			};
+		},
+	};
+
+	let response = await handleGet(request('GET', 'backup.zip'), bucket);
+	assert.equal(response.status, 200);
+	assert.equal(response.headers.get('Content-Range'), null);
+	assert.equal(response.headers.get('Content-Length'), String(body.byteLength));
+	assert.deepEqual(new Uint8Array(await response.arrayBuffer()), body);
 });

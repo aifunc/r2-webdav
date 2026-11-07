@@ -31,7 +31,7 @@ const DAV_PROPERTY_RESOLVERS = {
 	getcontentlanguage: (object) => object?.httpMetadata?.contentLanguage,
 	getcontentlength: (object) => (object === null || object === undefined ? '0' : object.size.toString()),
 	getcontenttype: (object) => object?.httpMetadata?.contentType,
-	getetag: (object) => object?.httpEtag ?? (object ? `"${object.etag}"` : undefined),
+	getetag: (object) => object?.httpEtag ?? (typeof object?.etag === 'string' ? `"${object.etag}"` : undefined),
 	getlastmodified: (object) => object?.uploaded.toUTCString(),
 	resourcetype: (object) =>
 		object === null || object === undefined ? '<collection />' : (object.customMetadata?.resourcetype ?? ''),
