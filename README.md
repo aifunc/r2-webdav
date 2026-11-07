@@ -47,7 +47,7 @@ tag = "v1"
 new_sqlite_classes = ["MutationGuardDurableObject"]
 ```
 
-`MutationGuardDurableObject` 是单实例的写入协调器，负责 shared/exclusive 层级守卫；已有部署升级时需要保留该 migration tag。绑定缺失时本地测试会回退到 R2 CAS 守卫，但生产环境应启用 DO。
+`MutationGuardDurableObject` 是单实例的写入协调器，负责 shared/exclusive 层级守卫；已有部署升级时需要保留该 migration tag。未配置该绑定时，Worker 对写方法返回 503（fail-closed）；单元测试直接调用 handler 时使用 R2 CAS 回退。
 
 部署时推荐使用多用户密钥：
 

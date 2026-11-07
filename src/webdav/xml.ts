@@ -9,6 +9,9 @@ import type { DavProperties, DeadProperty, LockDetails, PropfindRequest, Proppat
 export { escapeXml } from '../shared/escape';
 
 const PROPPATCH_ACTIONS = new Set<ProppatchOperation['action']>(['set', 'remove']);
+const MAX_XML_NODE_COUNT = 20_000;
+const MAX_XML_ELEMENT_DEPTH = 64;
+const MAX_XML_ATTRIBUTE_COUNT = 5_000;
 const XML_SERIALIZER = new XMLSerializer();
 type DavPropertyResolver = (
 	object: R2Object | null | undefined,
@@ -173,6 +176,32 @@ function getElementProperty(element: Element): DeadProperty | null {
 	};
 }
 
+function isWithinXmlBudget(document: Document): boolean {
+	let nodeCount = 0;
+	let attributeCount = 0;
+	let stack: Array<{ node: Node; depth: number }> = [{ node: document, depth: 0 }];
+	while (stack.length > 0) {
+		let { node, depth } = stack.pop()!;
+		nodeCount += 1;
+		if (nodeCount > MAX_XML_NODE_COUNT) {
+			return false;
+		}
+		if (node.nodeType === node.ELEMENT_NODE) {
+			if (depth > MAX_XML_ELEMENT_DEPTH) {
+				return false;
+			}
+			attributeCount += (node as Element).attributes.length;
+			if (attributeCount > MAX_XML_ATTRIBUTE_COUNT) {
+				return false;
+			}
+		}
+		for (let child = node.firstChild; child !== null; child = child.nextSibling) {
+			stack.push({ node: child, depth: node.nodeType === node.ELEMENT_NODE ? depth + 1 : depth });
+		}
+	}
+	return true;
+}
+
 function parseXmlDocument(body: string): Document | null {
 	let errors: string[] = [];
 	let document = new DOMParser({
@@ -182,7 +211,7 @@ function parseXmlDocument(body: string): Document | null {
 			fatalError: (message) => errors.push(message),
 		},
 	}).parseFromString(body, 'application/xml');
-	if (errors.length > 0) {
+	if (errors.length > 0 || !isWithinXmlBudget(document)) {
 		return null;
 	}
 	return document;

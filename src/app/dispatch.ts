@@ -40,7 +40,7 @@ function methodNotAllowedResponse(): Response {
 	});
 }
 
-const MUTATING_METHODS = new Set(['PUT', 'DELETE', 'MKCOL', 'PROPPATCH', 'COPY', 'MOVE']);
+export const MUTATING_METHODS = new Set(['PUT', 'DELETE', 'MKCOL', 'PROPPATCH', 'COPY', 'MOVE']);
 
 const METHOD_HANDLERS: Record<string, MethodHandler> = {
 	HEAD: handleHead,

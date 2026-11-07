@@ -5,6 +5,7 @@ import { test } from 'node:test';
 import { parseDirectorySidecar, serializeDirectorySidecar, updateDirectorySidecar } from '../src/domain/directories.js';
 import { decodeResourcePath, InvalidResourcePathError } from '../src/domain/path.js';
 import { handleDelete, handleGet } from '../src/webdav/http/handlers.js';
+import worker from '../src/app/worker.js';
 import { dispatchHandler } from '../src/app/dispatch.js';
 import { acquireResourceMutationGuard } from '../src/domain/locks.js';
 import { handleCopy, handleLock, handleMove, handleProppatch } from '../src/webdav/index.js';
@@ -234,6 +235,19 @@ test('prefixed DAV LOCK XML is parsed by namespace', async () => {
 	let response = await handleLock(request('LOCK', 'file.txt', {}, body), bucket);
 
 	assert.equal(response.status, 201);
+});
+
+test('worker fails closed when the mutation guard binding is missing', async () => {
+	let response = await worker.fetch(
+		request('PUT', 'a.txt', { Authorization: `Basic ${btoa('auditor:secret')}` }, 'body'),
+		{ bucket: createBucket(), AUTH_USERS: 'auditor:secret' },
+	);
+	assert.equal(response.status, 503);
+});
+
+test('XML with excessive nesting is rejected', () => {
+	let nested = '<a>'.repeat(70) + '</a>'.repeat(70);
+	assert.equal(parsePropfindRequest(`<D:propfind xmlns:D="DAV:">${nested}</D:propfind>`), null);
 });
 
 test('rootless XML is rejected without throwing', () => {

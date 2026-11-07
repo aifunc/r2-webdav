@@ -2,7 +2,7 @@ import { getAuthorizedUsers, isAuthorized } from '../domain/auth';
 import { resolveSidecarConfig } from '../shared/sidecar';
 import { CORS_ALLOW_HEADERS, CORS_EXPOSE_HEADERS, SUPPORT_METHODS } from '../shared/constants';
 import type { Env } from '../shared/types';
-import { dispatchHandler } from './dispatch';
+import { dispatchHandler, MUTATING_METHODS } from './dispatch';
 
 function applyCorsHeaders(request: Request, response: Response): Response {
 	response.headers.set('Access-Control-Allow-Origin', request.headers.get('Origin') ?? '*');
@@ -32,6 +32,15 @@ export default {
 					headers: {
 						'WWW-Authenticate': 'Basic realm="webdav"',
 					},
+				}),
+			);
+		}
+
+		if (env.MUTATION_GUARD === undefined && MUTATING_METHODS.has(request.method)) {
+			return applyCorsHeaders(
+				request,
+				new Response('Mutation guard unavailable', {
+					status: 503,
 				}),
 			);
 		}
