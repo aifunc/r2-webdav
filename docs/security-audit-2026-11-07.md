@@ -162,7 +162,7 @@
 
 **建议：** 调整忽略规则并提交必需脚本和 CI 文件，在受支持 Node 版本上从干净 checkout 执行 unit/check/litmus。将依赖审计或持续公告提醒纳入实际交付的控制。没有检查远端 GitHub UI/组织规则，不能断言远端完全没有其他保护。
 
-**修复状态：** 本地已修复。`.gitignore` 不再忽略 `.github/`、`scripts/`、`.gitignore`，workflow 改为 Node 22；但新增/取消忽略的文件尚未 `git add`/提交，因此“干净 checkout 可复现”和远端 CI 保护仍未完成。
+**修复状态：** 本地已修复并随 `4a85eff` 提交。`.gitignore` 不再忽略 `.github/`、`scripts/`、`.gitignore`，workflow 改为 Node 22；`git ls-files` 已确认这些文件进入版本库。仍需远端 push 后观察 CI 实际运行，并完成 litmus 验证，因此“远端 CI 已保护”尚不能仅凭本地提交断言。
 
 ## A09–A11：其他已复现协议缺陷
 
