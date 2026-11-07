@@ -210,7 +210,9 @@ function readLegacyLocks(metadata, normalizeLock = normalizeStoredLockDetails) {
 			const parsed = JSON.parse(records);
 			if (Array.isArray(parsed)) {
 				return parsed.flatMap((lockDetails) =>
-					lockDetails && typeof lockDetails === 'object' && typeof lockDetails.token === 'string' ? normalizeLock(lockDetails) : [],
+					lockDetails && typeof lockDetails === 'object' && typeof lockDetails.token === 'string'
+						? normalizeLock(lockDetails)
+						: [],
 				);
 			}
 		} catch {}
@@ -347,7 +349,9 @@ function canonicalizeSidecar(sidecar) {
 							token: lockDetails.token,
 						})),
 				}),
-		...(sidecar.uploaded !== undefined ? { uploaded: sidecar.uploaded instanceof Date ? sidecar.uploaded.toISOString() : sidecar.uploaded } : {}),
+		...(sidecar.uploaded !== undefined
+			? { uploaded: sidecar.uploaded instanceof Date ? sidecar.uploaded.toISOString() : sidecar.uploaded }
+			: {}),
 	};
 }
 
