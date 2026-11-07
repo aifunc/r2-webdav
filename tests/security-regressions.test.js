@@ -8,7 +8,12 @@ import { handleDelete, handleGet } from '../src/webdav/http/handlers.js';
 import { dispatchHandler } from '../src/app/dispatch.js';
 import { acquireResourceMutationGuard } from '../src/domain/locks.js';
 import { handleCopy, handleLock, handleMove, handleProppatch } from '../src/webdav/index.js';
-import { getDeadPropertyKey, parsePropfindRequest, parseProppatchRequest } from '../src/webdav/xml.js';
+import {
+	getDeadPropertyKey,
+	parseLockRequest,
+	parsePropfindRequest,
+	parseProppatchRequest,
+} from '../src/webdav/xml.js';
 import { normalizeDepthHeader, parseOverwriteHeader } from '../src/webdav/responses.js';
 
 function createObject(key, options = {}) {
@@ -236,6 +241,23 @@ test('rootless XML is rejected without throwing', () => {
 		assert.equal(parsePropfindRequest(body), null);
 		assert.equal(parseProppatchRequest(body), null);
 	}
+});
+
+test('dead property serialization rejects ill-formed processing instructions', () => {
+	let invalid = '<propertyupdate xmlns="DAV:"><set><prop><x xmlns="urn:test"><?xml?></x></prop></set></propertyupdate>';
+	assert.equal(parseProppatchRequest(invalid), null);
+
+	let valid =
+		'<propertyupdate xmlns="DAV:"><set><prop><x xmlns="urn:test"><?xml-stylesheet href="a"?></x></prop></set></propertyupdate>';
+	let parsed = parseProppatchRequest(valid);
+	assert.equal(parsed?.operations.length, 1);
+	assert.match(parsed.operations[0].property.valueXml, /xml-stylesheet/);
+});
+
+test('LOCK owner serialization rejects ill-formed processing instructions', () => {
+	let invalid =
+		'<lockinfo xmlns="DAV:"><lockscope><exclusive/></lockscope><locktype><write/></locktype><owner><?xml?></owner></lockinfo>';
+	assert.equal(parseLockRequest(invalid), null);
 });
 
 test('directory PROPPATCH applies set and remove in document order', async () => {

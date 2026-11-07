@@ -1,4 +1,4 @@
-import { DOMParser } from '@xmldom/xmldom';
+import { DOMParser, XMLSerializer } from '@xmldom/xmldom';
 
 import { getLockDetails, getLockDiscovery, getSupportedLock } from '../domain/locks';
 import { getResourceHref, isCollectionObject } from '../domain/path';
@@ -9,6 +9,7 @@ import type { DavProperties, DeadProperty, LockDetails, PropfindRequest, Proppat
 export { escapeXml } from '../shared/escape';
 
 const PROPPATCH_ACTIONS = new Set<ProppatchOperation['action']>(['set', 'remove']);
+const XML_SERIALIZER = new XMLSerializer();
 type DavPropertyResolver = (
 	object: R2Object | null | undefined,
 	context: { isCollection: boolean; resourceKey: string },
@@ -48,10 +49,14 @@ function getDisplayName(resourceKey: string): string | undefined {
 	return resourceKey.split('/').pop();
 }
 
-function serializeNodeChildren(node: Node): string {
+function serializeNodeChildren(node: Node): string | null {
 	let xml = '';
-	for (let child = node.firstChild; child !== null; child = child.nextSibling) {
-		xml += child.toString();
+	try {
+		for (let child = node.firstChild; child !== null; child = child.nextSibling) {
+			xml += XML_SERIALIZER.serializeToString(child, false, undefined, { requireWellFormed: true });
+		}
+	} catch {
+		return null;
 	}
 	return xml;
 }
@@ -156,11 +161,15 @@ function getElementProperty(element: Element): DeadProperty | null {
 	if (hasDavNamespaceDescendant(element)) {
 		return null;
 	}
+	let valueXml = serializeNodeChildren(element);
+	if (valueXml === null) {
+		return null;
+	}
 	return {
 		namespaceURI: element.namespaceURI ?? '',
 		localName: element.localName,
 		prefix: element.prefix,
-		valueXml: serializeNodeChildren(element),
+		valueXml,
 	};
 }
 
@@ -251,10 +260,17 @@ export function parseLockRequest(body: string): ParsedLockRequest | null {
 	}
 
 	let ownerElement = getChildElements(root).find((child) => isDavElement(child, 'owner'));
-	let owner = ownerElement === undefined ? undefined : serializeNodeChildren(ownerElement).trim();
+	let owner: string | undefined;
+	if (ownerElement !== undefined) {
+		let serializedOwner = serializeNodeChildren(ownerElement);
+		if (serializedOwner === null) {
+			return null;
+		}
+		owner = serializedOwner.trim() || undefined;
+	}
 	return {
 		scope: hasLocalName(scopeElement, 'shared') ? 'shared' : 'exclusive',
-		owner: owner === '' ? undefined : owner,
+		owner,
 	};
 }
 
