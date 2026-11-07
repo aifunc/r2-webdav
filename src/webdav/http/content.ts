@@ -133,6 +133,142 @@ function calcContentRange(object: R2ObjectBody): { rangeOffset: number; rangeEnd
 	return { rangeOffset, rangeEnd };
 }
 
+type ByteRange = {
+	first: number | null;
+	last: number | null;
+};
+
+// 返回 null 表示没有 Range 头，undefined 表示语法无效/不支持（按 RFC 9110 忽略它）。
+function parseByteRangeHeader(header: string | null): ByteRange | null | undefined {
+	if (header === null) {
+		return null;
+	}
+
+	let match = /^bytes=(.+)$/i.exec(header.trim());
+	if (match === null) {
+		return undefined;
+	}
+
+	let spec = match[1].trim();
+	if (spec.includes(',')) {
+		return undefined;
+	}
+
+	let parts = /^(\d*)-(\d*)$/.exec(spec);
+	if (parts === null) {
+		return undefined;
+	}
+
+	let firstText = parts[1] ?? '';
+	let lastText = parts[2] ?? '';
+	if (firstText === '' && lastText === '') {
+		return undefined;
+	}
+
+	if (firstText === '') {
+		let suffix = Number(lastText);
+		return Number.isSafeInteger(suffix) ? { first: null, last: suffix } : undefined;
+	}
+
+	let first = Number(firstText);
+	if (!Number.isSafeInteger(first)) {
+		return undefined;
+	}
+	if (lastText === '') {
+		return { first, last: null };
+	}
+
+	let last = Number(lastText);
+	if (!Number.isSafeInteger(last) || last < first) {
+		return undefined;
+	}
+
+	return { first, last };
+}
+
+function resolveByteRange(range: ByteRange, size: number): { offset: number; length: number } | null {
+	if (range.first === null) {
+		let suffix = range.last ?? 0;
+		if (suffix === 0 || size === 0) {
+			return null;
+		}
+		let length = Math.min(suffix, size);
+		return { offset: size - length, length };
+	}
+
+	if (size === 0 || range.first >= size) {
+		return null;
+	}
+
+	let end = range.last === null ? size - 1 : Math.min(range.last, size - 1);
+	return { offset: range.first, length: end - range.first + 1 };
+}
+
+type IfRangeValidator = { etag: string } | { date: number };
+
+function parseIfRangeHeader(header: string | null): IfRangeValidator | null {
+	if (header === null) {
+		return null;
+	}
+
+	let value = header.trim();
+	if (value === '') {
+		return null;
+	}
+	if (value.startsWith('"') || value.startsWith('W/')) {
+		return { etag: value };
+	}
+
+	let timestamp = Date.parse(value);
+	return Number.isFinite(timestamp) ? { date: timestamp } : null;
+}
+
+function ifRangeMatches(
+	validator: IfRangeValidator,
+	resource: Pick<R2Object, 'etag' | 'httpEtag' | 'uploaded'>,
+): boolean {
+	if ('etag' in validator) {
+		if (validator.etag.startsWith('W/')) {
+			return false;
+		}
+		return validator.etag === (resource.httpEtag || `"${resource.etag}"`);
+	}
+
+	return Math.floor(resource.uploaded.getTime() / 1000) <= Math.floor(validator.date / 1000);
+}
+
+async function negotiateRequestRange(
+	request: Request,
+	bucket: R2Bucket,
+	resourcePath: string,
+): Promise<{ range: ByteRange | null; missing: boolean }> {
+	let range = parseByteRangeHeader(request.headers.get('Range'));
+	if (range === undefined) {
+		range = null;
+	}
+
+	let validator = range === null ? null : parseIfRangeHeader(request.headers.get('If-Range'));
+	if (range !== null && validator !== null) {
+		let meta = await bucket.head(resourcePath);
+		if (meta === null) {
+			return { range: null, missing: true };
+		}
+		if (!ifRangeMatches(validator, meta)) {
+			range = null;
+		}
+	}
+
+	return { range, missing: false };
+}
+
+function buildGetOptions(request: Request, range: ByteRange | null): R2GetOptions {
+	return range === null ? { onlyIf: request.headers } : { onlyIf: request.headers, range: request.headers };
+}
+
+function getUnsatisfiableRangeResponse(size: number): Response {
+	return new Response(null, { status: 416, headers: { 'Content-Range': `bytes */${size}` } });
+}
+
 async function renderDirectoryListing(
 	bucket: R2Bucket,
 	resourcePath: string,
@@ -197,15 +333,24 @@ export async function handleHead(
 		});
 	}
 
-	let object = await bucket.get(resourcePath, { onlyIf: request.headers, range: request.headers });
-	if (object === null) {
-		if (request.headers.has('Range')) {
-			let meta = await bucket.head(resourcePath);
-			if (meta !== null) {
-				return new Response(null, { status: 416, headers: { 'Content-Range': `bytes */${meta.size}` } });
-			}
-		}
+	let { range, missing } = await negotiateRequestRange(request, bucket, resourcePath);
+	if (missing) {
 		return createTextResponse('notFound');
+	}
+
+	let object = await bucket.get(resourcePath, buildGetOptions(request, range));
+	if (object === null) {
+		if (range === null) {
+			return createTextResponse('notFound');
+		}
+		let meta = await bucket.head(resourcePath);
+		if (meta === null) {
+			return createTextResponse('notFound');
+		}
+		if (resolveByteRange(range, meta.size) === null) {
+			return getUnsatisfiableRangeResponse(meta.size);
+		}
+		return createTextResponse('preconditionFailed');
 	}
 	if (!isR2ObjectBody(object)) {
 		if (request.headers.has('If-None-Match') || request.headers.has('If-Modified-Since')) {
@@ -214,8 +359,19 @@ export async function handleHead(
 		return createTextResponse('preconditionFailed');
 	}
 
-	let partial = request.headers.has('Range') && object.range !== undefined;
+	let partial = false;
 	let { rangeOffset, rangeEnd } = calcContentRange(object);
+	if (range !== null) {
+		if (resolveByteRange(range, object.size) === null) {
+			return getUnsatisfiableRangeResponse(object.size);
+		}
+		partial = object.range !== undefined;
+	}
+	if (!partial) {
+		rangeOffset = 0;
+		rangeEnd = object.size - 1;
+	}
+
 	return new Response(null, {
 		status: partial ? 206 : 200,
 		headers: buildObjectResponseHeaders(object, rangeOffset, rangeEnd, partial),
@@ -233,19 +389,25 @@ export async function handleGet(
 		return renderDirectoryListing(bucket, resourcePath, sidecarConfig);
 	}
 
-	let object = await bucket.get(resourcePath, {
-		onlyIf: request.headers,
-		range: request.headers,
-	});
+	let { range, missing } = await negotiateRequestRange(request, bucket, resourcePath);
+	if (missing) {
+		return createTextResponse('notFound');
+	}
+
+	let object = await bucket.get(resourcePath, buildGetOptions(request, range));
 
 	if (object === null) {
-		if (request.headers.has('Range')) {
-			let meta = await bucket.head(resourcePath);
-			if (meta !== null) {
-				return new Response(null, { status: 416, headers: { 'Content-Range': `bytes */${meta.size}` } });
-			}
+		if (range === null) {
+			return createTextResponse('notFound');
 		}
-		return createTextResponse('notFound');
+		let meta = await bucket.head(resourcePath);
+		if (meta === null) {
+			return createTextResponse('notFound');
+		}
+		if (resolveByteRange(range, meta.size) === null) {
+			return getUnsatisfiableRangeResponse(meta.size);
+		}
+		return createTextResponse('preconditionFailed');
 	}
 	if (!isR2ObjectBody(object)) {
 		if (request.headers.has('If-None-Match') || request.headers.has('If-Modified-Since')) {
@@ -254,8 +416,19 @@ export async function handleGet(
 		return createTextResponse('preconditionFailed');
 	}
 
-	let partial = request.headers.has('Range') && object.range !== undefined;
+	let partial = false;
 	let { rangeOffset, rangeEnd } = calcContentRange(object);
+	if (range !== null) {
+		if (resolveByteRange(range, object.size) === null) {
+			return getUnsatisfiableRangeResponse(object.size);
+		}
+		partial = object.range !== undefined;
+	}
+	if (!partial) {
+		rangeOffset = 0;
+		rangeEnd = object.size - 1;
+	}
+
 	return new Response(object.body, {
 		status: partial ? 206 : 200,
 		headers: buildObjectResponseHeaders(object, rangeOffset, rangeEnd, partial),

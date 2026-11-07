@@ -4,7 +4,7 @@ import { test } from 'node:test';
 
 import { parseDirectorySidecar, serializeDirectorySidecar, updateDirectorySidecar } from '../src/domain/directories.js';
 import { decodeResourcePath, InvalidResourcePathError } from '../src/domain/path.js';
-import { handleDelete, handleGet, handleMkcol } from '../src/webdav/http/handlers.js';
+import { handleDelete, handleGet, handleHead, handleMkcol } from '../src/webdav/http/handlers.js';
 import worker from '../src/app/worker.js';
 import { dispatchHandler } from '../src/app/dispatch.js';
 import {
@@ -625,4 +625,116 @@ test('GET without a Range header returns the full body with 200', async () => {
 	assert.equal(response.headers.get('Content-Range'), null);
 	assert.equal(response.headers.get('Content-Length'), String(body.byteLength));
 	assert.deepEqual(new Uint8Array(await response.arrayBuffer()), body);
+});
+
+function createRangeObject(size, bodyText, etag = '"abc"') {
+	let body = new TextEncoder().encode(bodyText);
+	return {
+		key: 'file.bin',
+		size,
+		etag: etag.replace(/^"|"$/g, ''),
+		httpEtag: etag,
+		uploaded: new Date('2024-01-01T00:00:00.000Z'),
+		httpMetadata: {},
+		customMetadata: {},
+		body,
+	};
+}
+
+test('GET answers 416 for an unsatisfiable Range instead of returning 206', async () => {
+	let object = createRangeObject(10, '0123456789');
+	let bucket = {
+		async get() {
+			// Miniflare 对不可满足的 Range 仍返回整个对象，这里复现该行为。
+			return { ...object, range: { offset: 0, length: 10 }, body: new Response(object.body).body };
+		},
+	};
+
+	let response = await handleGet(request('GET', 'file.bin', { Range: 'bytes=100-200' }), bucket);
+	assert.equal(response.status, 416);
+	assert.equal(response.headers.get('Content-Range'), 'bytes */10');
+});
+
+test('GET answers 416 when the bucket reports an unsatisfiable Range as missing', async () => {
+	let object = createRangeObject(10, '0123456789');
+	let bucket = {
+		async get() {
+			return null;
+		},
+		async head() {
+			return object;
+		},
+	};
+
+	let response = await handleGet(request('GET', 'file.bin', { Range: 'bytes=-0' }), bucket);
+	assert.equal(response.status, 416);
+	assert.equal(response.headers.get('Content-Range'), 'bytes */10');
+});
+
+test('GET ignores a malformed Range header and returns the full object', async () => {
+	let object = createRangeObject(10, '0123456789');
+	let seen = [];
+	let bucket = {
+		async get(key, options = {}) {
+			seen.push(options);
+			return { ...object, body: new Response(object.body).body };
+		},
+	};
+
+	let response = await handleGet(request('GET', 'file.bin', { Range: 'apples' }), bucket);
+	assert.equal(response.status, 200);
+	assert.equal(response.headers.get('Content-Range'), null);
+	assert.equal(seen[0].range, undefined);
+	assert.deepEqual(new Uint8Array(await response.arrayBuffer()), object.body);
+});
+
+test('GET ignores Range when If-Range does not match', async () => {
+	let object = createRangeObject(10, '0123456789');
+	let seen = [];
+	let bucket = {
+		async head() {
+			return object;
+		},
+		async get(key, options = {}) {
+			seen.push(options);
+			return { ...object, body: new Response(object.body).body };
+		},
+	};
+
+	let response = await handleGet(request('GET', 'file.bin', { Range: 'bytes=0-3', 'If-Range': '"other"' }), bucket);
+	assert.equal(response.status, 200);
+	assert.equal(response.headers.get('Content-Range'), null);
+	assert.equal(seen[0].range, undefined);
+	assert.deepEqual(new Uint8Array(await response.arrayBuffer()), object.body);
+});
+
+test('GET honors Range when If-Range matches', async () => {
+	let object = createRangeObject(10, '0123456789');
+	let bucket = {
+		async head() {
+			return object;
+		},
+		async get() {
+			return { ...object, range: { offset: 0, length: 4 }, body: new Response(object.body.slice(0, 4)).body };
+		},
+	};
+
+	let response = await handleGet(request('GET', 'file.bin', { Range: 'bytes=0-3', 'If-Range': '"abc"' }), bucket);
+	assert.equal(response.status, 206);
+	assert.equal(response.headers.get('Content-Range'), 'bytes 0-3/10');
+	assert.equal(await response.text(), '0123');
+});
+
+test('HEAD reports the same Range decision as GET', async () => {
+	let object = createRangeObject(10, '0123456789');
+	let bucket = {
+		async get() {
+			return { ...object, range: { offset: 0, length: 4 }, body: new Response(object.body.slice(0, 4)).body };
+		},
+	};
+
+	let response = await handleHead(request('HEAD', 'file.bin', { Range: 'bytes=0-3' }), bucket);
+	assert.equal(response.status, 206);
+	assert.equal(response.headers.get('Content-Range'), 'bytes 0-3/10');
+	assert.equal(response.headers.get('Content-Length'), '4');
 });
