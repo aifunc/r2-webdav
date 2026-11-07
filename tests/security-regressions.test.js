@@ -238,11 +238,18 @@ test('prefixed DAV LOCK XML is parsed by namespace', async () => {
 });
 
 test('worker fails closed when the mutation guard binding is missing', async () => {
-	let response = await worker.fetch(
-		request('PUT', 'a.txt', { Authorization: `Basic ${btoa('auditor:secret')}` }, 'body'),
-		{ bucket: createBucket(), AUTH_USERS: 'auditor:secret' },
-	);
-	assert.equal(response.status, 503);
+	let env = { bucket: createBucket(), AUTH_USERS: 'auditor:secret' };
+	for (let [method, body] of [
+		['PUT', 'body'],
+		['LOCK', '<D:lockinfo xmlns:D="DAV:" />'],
+		['UNLOCK', undefined],
+	]) {
+		let response = await worker.fetch(
+			request(method, 'a.txt', { Authorization: `Basic ${btoa('auditor:secret')}` }, body),
+			env,
+		);
+		assert.equal(response.status, 503);
+	}
 });
 
 test('XML with excessive nesting is rejected', () => {

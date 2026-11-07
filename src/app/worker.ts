@@ -36,7 +36,10 @@ export default {
 			);
 		}
 
-		if (env.MUTATION_GUARD === undefined && MUTATING_METHODS.has(request.method)) {
+		if (
+			env.MUTATION_GUARD === undefined &&
+			(MUTATING_METHODS.has(request.method) || request.method === 'LOCK' || request.method === 'UNLOCK')
+		) {
 			return applyCorsHeaders(
 				request,
 				new Response('Mutation guard unavailable', {
