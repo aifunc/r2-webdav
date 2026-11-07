@@ -16,7 +16,7 @@
 		"@cloudflare/workers-types": "*",
 		"prettier": "^3.1.1",
 		"typescript": "^5.0.4",
-		"wrangler": "^4.20.0"
+		"wrangler": "^4.158.0"
 	},
 	"type": "module",
 	"dependencies": {
