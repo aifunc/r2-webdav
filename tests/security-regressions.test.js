@@ -7,7 +7,12 @@ import { decodeResourcePath, InvalidResourcePathError } from '../src/domain/path
 import { handleDelete, handleGet } from '../src/webdav/http/handlers.js';
 import worker from '../src/app/worker.js';
 import { dispatchHandler } from '../src/app/dispatch.js';
-import { acquireResourceMutationGuard, buildInternalDeleteIfHeader } from '../src/domain/locks.js';
+import {
+	acquireResourceMutationGuard,
+	buildInternalDeleteIfHeader,
+	createGuardAwareBucket,
+	LockMutationGuardLostError,
+} from '../src/domain/locks.js';
 import { handleCopy, handleLock, handleMove, handleProppatch } from '../src/webdav/index.js';
 import {
 	getDeadProperties,
@@ -433,6 +438,18 @@ test('dispatch guards both source and destination for COPY', async () => {
 	);
 	assert.equal(response.status, 423);
 	await destinationGuard.release();
+});
+
+test('guard-aware bucket rejects writes after the lease is lost', async () => {
+	let bucket = createConditionalBucket();
+	let lost = false;
+	let guard = { isLost: () => lost, release: async () => {} };
+	let guardedBucket = createGuardAwareBucket(bucket, guard);
+	await guardedBucket.put('lost.txt', 'before');
+	lost = true;
+	assert.throws(() => guardedBucket.put('lost.txt', 'after'), LockMutationGuardLostError);
+	assert.throws(() => guardedBucket.delete('lost.txt'), LockMutationGuardLostError);
+	assert.ok(await guardedBucket.head('lost.txt'));
 });
 
 test('dispatch maps guard capacity to service unavailable', async () => {

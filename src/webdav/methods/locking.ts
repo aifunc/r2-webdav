@@ -1,6 +1,8 @@
 import { DEAD_PROPERTY_PREFIX } from '../../shared/constants';
 import {
 	acquireResourceMutationGuard,
+	createGuardAwareBucket,
+	LockMutationGuardLostError,
 	assertLockPermission,
 	assertNoDescendantLockConflicts,
 	determineLockDepth,
@@ -61,8 +63,18 @@ export async function handleLock(
 	if (guard === null) {
 		return createTextResponse('locked');
 	}
+	if (guard.isLost()) {
+		await guard.release();
+		return createTextResponse('unavailable');
+	}
+	let guardedBucket = createGuardAwareBucket(bucket, guard);
 	try {
-		return await acquireLock(request, bucket, sidecarConfig);
+		return await acquireLock(request, guardedBucket, sidecarConfig);
+	} catch (error) {
+		if (error instanceof LockMutationGuardLostError) {
+			return createTextResponse('unavailable');
+		}
+		throw error;
 	} finally {
 		await guard.release();
 	}
@@ -305,8 +317,18 @@ export async function handleUnlock(
 	if (guard === null) {
 		return createTextResponse('locked');
 	}
+	if (guard.isLost()) {
+		await guard.release();
+		return createTextResponse('unavailable');
+	}
+	let guardedBucket = createGuardAwareBucket(bucket, guard);
 	try {
-		return await unlockResource(request, bucket, sidecarConfig);
+		return await unlockResource(request, guardedBucket, sidecarConfig);
+	} catch (error) {
+		if (error instanceof LockMutationGuardLostError) {
+			return createTextResponse('unavailable');
+		}
+		throw error;
 	} finally {
 		await guard.release();
 	}

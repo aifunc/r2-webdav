@@ -1,7 +1,7 @@
 import type { Env } from '../shared/types';
 
 const GUARD_KEY_PREFIX = 'guard:';
-const MAX_GUARD_REQUESTS = 256;
+const MAX_GUARD_REQUESTS = 1024;
 const MAX_GUARD_PATH_LENGTH = 1024;
 const MAX_GUARD_PATH_CHARS = 32 * 1024;
 const MAX_ACTIVE_TOKENS = 256;

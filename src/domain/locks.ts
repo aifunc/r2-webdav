@@ -836,6 +836,29 @@ export interface LockMutationGuard {
 
 export type LockMutationGuardResult = LockMutationGuard | 'capacity' | null;
 
+export class LockMutationGuardLostError extends Error {
+	constructor() {
+		super('Mutation guard lease was lost');
+	}
+}
+
+export function createGuardAwareBucket(bucket: R2Bucket, guard: LockMutationGuard): R2Bucket {
+	return new Proxy(bucket, {
+		get(target, property, receiver) {
+			if (property === 'put' || property === 'delete') {
+				return (...args: unknown[]): unknown => {
+					if (guard.isLost()) {
+						throw new LockMutationGuardLostError();
+					}
+					return (target[property] as (...values: unknown[]) => unknown).apply(target, args);
+				};
+			}
+			let value = Reflect.get(target, property, receiver);
+			return typeof value === 'function' ? value.bind(target) : value;
+		},
+	});
+}
+
 function emptyLockMutationGuardRecord(): LockMutationGuardRecord {
 	return { exclusive: null, shared: [] };
 }

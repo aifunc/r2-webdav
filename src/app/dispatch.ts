@@ -3,7 +3,7 @@ import { DEFAULT_SIDECAR_CONFIG } from '../shared/sidecar';
 import { createTextResponse } from '../webdav/responses';
 import { handleDelete, handleGet, handleHead, handleMkcol, handlePut } from '../webdav/http/handlers';
 import { handleCopy, handleLock, handleMove, handlePropfind, handleProppatch, handleUnlock } from '../webdav/index.js';
-import { acquireResourceMutationGuards } from '../domain/locks';
+import { acquireResourceMutationGuards, createGuardAwareBucket, LockMutationGuardLostError } from '../domain/locks';
 import {
 	InvalidResourcePathError,
 	isReservedWebdavNamespace,
@@ -101,7 +101,15 @@ export async function dispatchHandler(
 			return createTextResponse('locked');
 		}
 		try {
-			return await handler(request, bucket, sidecarConfig, mutationGuard);
+			if (guard.isLost()) {
+				return createTextResponse('unavailable');
+			}
+			return await handler(request, createGuardAwareBucket(bucket, guard), sidecarConfig, mutationGuard);
+		} catch (error) {
+			if (error instanceof LockMutationGuardLostError) {
+				return createTextResponse('unavailable');
+			}
+			throw error;
 		} finally {
 			await guard.release();
 		}
