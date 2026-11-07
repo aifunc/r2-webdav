@@ -1,56 +1,56 @@
 # r2-webdav 安全与缺陷审计：2026-11-07
 
-审计基线：`02a524e85eeb664f94801a789fd5f71ba347fb5b`，当前工作区 `main`。日期为 **2026-11-07，Asia/Shanghai**。审查了全部 `src/`、现有测试、依赖锁文件、Wrangler 配置，以及本地开发、迁移和 CI 文件。初版报告交付时业务代码未修改；随后按用户要求完成修复，当前工作树包含源码、测试、依赖和本地 CI/忽略规则的修改，尚未提交或部署。新增的回归测试与本地验证材料见下文“修复实施状态”。
+审计基线：`02a524e85eeb664f94801a789fd5f71ba347fb5b`，当前工作区 `main`。日期为 **2026-11-07，Asia/Shanghai**。审查了全部 `src/`、现有测试、依赖锁文件、Wrangler 配置，以及本地开发、迁移和 CI 文件。初版报告交付时业务代码未修改；随后按用户要求完成修复。A01–A11 与回归测试已提交为 `4a85eff`；Wrangler 4.158.0 依赖升级已提交为 `423fac2`。未部署、未迁移。新增的回归测试与本地验证材料见下文“修复实施状态”。
 
-**结论：初版审计复现了数据丢失、条件请求失效和锁一致性缺陷；线上唯一第三方 XML 依赖曾命中公开安全公告，开发工具链亦有公告命中。修复后 A01–A04、A06–A11 已在本工作树修复并有回归覆盖；A05 的并发 LOCK 通过独立的 R2 CAS 变更守卫串行化，目录 sidecar 与文件锁都不再出现并发双成功；A12 开发链公告仍待兼容升级。未发现明确的源码后门迹象。**
+**结论：初版审计复现了数据丢失、条件请求失效和锁一致性缺陷；线上唯一第三方 XML 依赖曾命中公开安全公告，开发工具链亦有公告命中。修复后 A01–A04、A06–A11 已在本工作树修复并有回归覆盖；A05 的并发 LOCK 通过独立的 R2 CAS 变更守卫串行化，目录 sidecar 与文件锁都不再出现并发双成功；A12 已通过 Wrangler 4.158.0 升级消除 npm 命中，但 Miniflare 5 beta 仍是兼容性风险。未发现明确的源码后门迹象。**
 
-**网络恢复后的补核已完成：** 已直接读取 GitHub/OSV 官方公告、npm 发布信息、Cloudflare 文档、Node.js 支持周期及 RFC 原文，补全 xmldom 的 CVE、日期、修复版本和默认/可选防护差异，并新增 A12 开发工具链公告命中。修复前最新只读 npm audit 返回 **5 个 high 受影响包条目、36 条独立 GHSA**；将 xmldom 升到 0.8.15 后为 **4 个 high 受影响包条目、26 条独立 GHSA（Undici 23 + sharp 3）**。Wrangler/Miniflare 是依赖风险传导条目，不是额外的独立公告。依赖链、完整来源与适用性见 [依赖与供应链研究报告](security-dependency-research-2026-11-07.md)、[xmldom 公告补核](security-xmldom-verification-2026-11-07.md) 和 [Cloudflare 开发链补核](security-cloudflare-verification-2026-11-07.md)。托管实例的实际补丁状态仍不能从本地版本推定。
+**网络恢复后的补核已完成：** 已直接读取 GitHub/OSV 官方公告、npm 发布信息、Cloudflare 文档、Node.js 支持周期及 RFC 原文，补全 xmldom 的 CVE、日期、修复版本和默认/可选防护差异，并新增 A12 开发工具链公告命中。修复前最新只读 npm audit 返回 **5 个 high 受影响包条目、36 条独立 GHSA**；将 xmldom 升到 0.8.15 后为 **4 个 high 受影响包条目、26 条独立 GHSA（Undici 23 + sharp 3）**。进一步升级到 Wrangler **4.158.0**（Miniflare 5.20261104.0-beta、Undici 7.30.1、sharp 0.35.5）后，隔离 `npm audit` 为 **exit 0、0 条**。升级前 Wrangler/Miniflare 是依赖风险传导条目，不是额外的独立公告。依赖链、完整来源与适用性见 [依赖与供应链研究报告](security-dependency-research-2026-11-07.md)、[xmldom 公告补核](security-xmldom-verification-2026-11-07.md) 和 [Cloudflare 开发链补核](security-cloudflare-verification-2026-11-07.md)。托管实例的实际补丁状态仍不能从本地版本推定。
 
 ## 范围与攻击前提
 
 - 普通方法在 `src/app/worker.ts:24` 先检查 Basic 鉴权；未配置有效账号时拒绝访问。`OPTIONS` 无需认证，但不会进入 XML 解析或数据修改。此次未复现匿名鉴权绕过。
 - 以下 XML、写入、锁和内容上传问题均要求**有效 WebDAV 凭据或已被盗用的账号**。浏览器内容问题还要求有人打开上传内容。数据一致性问题也可由正常客户端的错误重试、并发同步或特殊文件名触发。
 - `AUTH_USERS` 配置的是共享同一 bucket 的多个账号，代码不区分用户身份或用户目录权限。它不能作为租户隔离机制；这里没有把这种设计本身列为越权漏洞。
-- 所有重现均使用内存模型或独立本地 Miniflare R2，不访问生产 R2，不使用真实应用凭据。初版审计没有执行部署、迁移、依赖安装或自动修复；后续修复实施只在本地安装了 xmldom 0.8.15，未部署、未迁移。
+- 所有重现均使用内存模型或独立本地 Miniflare R2，不访问生产 R2，不使用真实应用凭据。初版审计没有执行部署、迁移、依赖安装或自动修复；后续修复实施只在本地安装了 xmldom 0.8.15，并在本地安装了 Wrangler 4.158.0；未部署、未迁移。
 - 未跟踪的 `.agents/`、`.forge/`、`.serena/` 和 `bimtail.dmg` 不属于已跟踪应用源码；未运行或挂载该镜像，没有对其二进制内容逆向，不能据此保证它无恶意内容。
 
 ## 发现概览
 
 这里的等级反映本项目的触发条件与影响，和 npm 公告的原始级别分别记录。WebDAV 锁是并发控制机制，以下“锁绕过”不等于绕过账号鉴权。
 
-| 编号 | 等级                     | 问题                                                             | 主要证据位置                                                                             | 证据强度                                                          |
-| ---- | ------------------------ | ---------------------------------------------------------------- | ---------------------------------------------------------------------------------------- | ----------------------------------------------------------------- |
-| A01  | 高                       | 线上 xmldom 命中解析复杂度等安全公告                             | `package-lock.json:1220`；`src/webdav/xml.ts:169`                                        | 在线 npm audit、代码可达性、受控性能验证                          |
-| A02  | 高                       | 无效 Depth 的 COPY/MOVE 先删除目标再返回 400                     | `src/webdav/methods/transfer.ts:76`、`:199`                                              | 内存重现；COPY 在本地 R2 再确认                                   |
-| A03  | 中                       | 编码斜杠造成资源名与 sidecar 名不一致，自移动检查可被绕过        | `src/domain/path.ts:29`；`src/domain/directories.ts:20`                                  | 鉴权入口重现、本地 R2 再确认                                      |
-| A04  | 中                       | 集合 MOVE 与新建无限深度锁缺少子树锁冲突检查                     | `src/webdav/methods/transfer.ts:154`；`src/webdav/methods/locking.ts:71`                 | 文件锁、目录 sidecar 锁及原锁持有人操作均重现                     |
-| A05  | 中                       | 文件与首次目录排他锁都存在并发覆盖                               | `src/domain/storage.ts:648`；`src/domain/directories.ts:206`                             | 确定性交错重现；文件问题在本地 R2 再确认                          |
-| A06  | 中                       | DELETE/PROPPATCH 忽略 If-Match，WebDAV If 的假条件也可被忽略     | `src/webdav/http/mutations.ts:109`；`src/domain/locks.ts:503`                            | 鉴权入口重现；DELETE 在本地 R2 再确认                             |
-| A07  | 中，取决于浏览器使用方式 | SVG/显式 inline HTML 可作为同源活动内容返回                      | `src/webdav/http/content.ts:28`、`:65`                                                   | PUT→GET 内容和响应头已验证；未运行浏览器                          |
-| A08  | 中，工程与发布可靠性     | 关键脚本/CI 未跟踪，本地 CI Node 版本也不兼容                    | `package.json:7`、`:9`；本地 workflow `:28`                                              | Git 索引、忽略规则、工具启动代码                                  |
-| A09  | 低                       | 目录 PROPPATCH 打乱 remove/set 顺序并丢失最终属性                | `src/webdav/methods/proppatch.ts:124`                                                    | 重现 207 成功但属性丢失                                           |
-| A10  | 中，协议兼容性           | LOCK 正则解析拒绝标准命名空间前缀                                | `src/webdav/methods/locking.ts:65`                                                       | 标准 `D:write` 请求返回 400                                       |
-| A11  | 低                       | 无根元素 XML 触发未捕获异常                                      | `src/webdav/xml.ts:192`                                                                  | 两种请求体、两个解析入口均重现                                    |
-| A12  | 中，开发链与供应链       | 开发工具链的精确版本命中 26 条公告；bundle 另有未列入 npm 的组件 | `package-lock.json:1336`、`:1400`、`:1480`；`node_modules/wrangler/wrangler-dist/cli.js` | 官方 OSV/GitHub 精确版本查询、bundle 内嵌版本读取、可达性边界分析 |
+| 编号 | 等级                     | 问题                                                                                        | 主要证据位置                                                                                      | 证据强度                                                                          |
+| ---- | ------------------------ | ------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------- |
+| A01  | 高                       | 线上 xmldom 命中解析复杂度等安全公告                                                        | `package-lock.json:1220`；`src/webdav/xml.ts:169`                                                 | 在线 npm audit、代码可达性、受控性能验证                                          |
+| A02  | 高                       | 无效 Depth 的 COPY/MOVE 先删除目标再返回 400                                                | `src/webdav/methods/transfer.ts:76`、`:199`                                                       | 内存重现；COPY 在本地 R2 再确认                                                   |
+| A03  | 中                       | 编码斜杠造成资源名与 sidecar 名不一致，自移动检查可被绕过                                   | `src/domain/path.ts:29`；`src/domain/directories.ts:20`                                           | 鉴权入口重现、本地 R2 再确认                                                      |
+| A04  | 中                       | 集合 MOVE 与新建无限深度锁缺少子树锁冲突检查                                                | `src/webdav/methods/transfer.ts:154`；`src/webdav/methods/locking.ts:71`                          | 文件锁、目录 sidecar 锁及原锁持有人操作均重现                                     |
+| A05  | 中                       | 文件与首次目录排他锁都存在并发覆盖                                                          | `src/domain/storage.ts:648`；`src/domain/directories.ts:206`                                      | 确定性交错重现；文件问题在本地 R2 再确认                                          |
+| A06  | 中                       | DELETE/PROPPATCH 忽略 If-Match，WebDAV If 的假条件也可被忽略                                | `src/webdav/http/mutations.ts:109`；`src/domain/locks.ts:503`                                     | 鉴权入口重现；DELETE 在本地 R2 再确认                                             |
+| A07  | 中，取决于浏览器使用方式 | SVG/显式 inline HTML 可作为同源活动内容返回                                                 | `src/webdav/http/content.ts:28`、`:65`                                                            | PUT→GET 内容和响应头已验证；未运行浏览器                                          |
+| A08  | 中，工程与发布可靠性     | 关键脚本/CI 未跟踪，本地 CI Node 版本也不兼容                                               | `package.json:7`、`:9`；本地 workflow `:28`                                                       | Git 索引、忽略规则、工具启动代码                                                  |
+| A09  | 低                       | 目录 PROPPATCH 打乱 remove/set 顺序并丢失最终属性                                           | `src/webdav/methods/proppatch.ts:124`                                                             | 重现 207 成功但属性丢失                                                           |
+| A10  | 中，协议兼容性           | LOCK 正则解析拒绝标准命名空间前缀                                                           | `src/webdav/methods/locking.ts:65`                                                                | 标准 `D:write` 请求返回 400                                                       |
+| A11  | 低                       | 无根元素 XML 触发未捕获异常                                                                 | `src/webdav/xml.ts:192`                                                                           | 两种请求体、两个解析入口均重现                                                    |
+| A12  | 中，开发链与供应链       | 升级前开发工具链精确版本命中 26 条公告；升级后 npm audit 为 0；bundle 另有未列入 npm 的组件 | `package-lock.json:1373`、`:1434`、`:1519`、`:1560`；`node_modules/wrangler/wrangler-dist/cli.js` | 官方 OSV/GitHub 精确版本查询、升级后隔离审计、bundle 内嵌版本读取、可达性边界分析 |
 
 ## 修复实施状态（2026-11-07）
 
 以下状态对应当前工作树，不是已发布版本。修复目标来自初版发现；没有执行部署、迁移或远程 R2 操作。
 
-| 编号 | 状态                 | 实施与验证                                                                                                                                                                                                                     |
-| ---- | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| A01  | 已修复               | `@xmldom/xmldom` 升到 **0.8.15** 并更新锁文件；未采用会破坏对象形式 `errorHandler` 的 0.9.12。修复后 npm audit 不再列出 xmldom。                                                                                               |
-| A02  | 已修复               | 统一 `normalizeDepthHeader`/`parseOverwriteHeader`；在删除目标前校验 Depth 和 Overwrite，集合只接受 0/infinity，无效值返回 400 且目标保留。                                                                                    |
-| A03  | 已修复               | `decodeResourcePath` 对解码后 segment 含 `/`、`\`、NUL 抛 `InvalidResourcePathError`，入口返回 400，避免 sidecar 别名和自移动绕过。                                                                                            |
-| A04  | 已修复               | MOVE 源检查改用递归锁检查；新建 depth infinity 锁先检查后代锁，冲突返回 423；shared 请求只与后代 exclusive 锁冲突。                                                                                                            |
-| A05  | 已修复（守卫串行化） | 目录 sidecar 首次写用 `etagDoesNotMatch:'*'` 条件创建；新增 R2 CAS 锁变更守卫，所有 LOCK/UNLOCK 状态变更串行化，并发文件/目录 LOCK 只成功一个（201/423）。守卫依赖 lease 与释放；跨 COPY/MOVE 与 LOCK 的原子性仍不在本项范围。 |
-| A06  | 已修复               | DELETE/PROPPATCH 增加 `If-Match`；`If` 条件列表整体求值，假条件在修改前返回 412；条件检查与删除之间的 R2 窗口仍在文档中标注。                                                                                                  |
-| A07  | 已修复（缓解）       | HTML/XHTML/SVG/XML/JS 等活动类型强制 `Content-Disposition: attachment`，覆盖上传的 inline，并加 `X-Content-Type-Options: nosniff` 与 `CSP: sandbox`。                                                                          |
-| A08  | 已修复但未提交       | `.gitignore` 不再忽略 `.github/`、`scripts/`、`.gitignore`；workflow Node 20→22。文件仍未被 `git add`，因此尚未进入版本库或远端 CI。                                                                                           |
-| A09  | 已修复               | 目录 PROPPATCH 按解析后的 operations 顺序执行 set/remove，不再统一先 set 后 remove。                                                                                                                                           |
-| A10  | 已修复               | LOCK 使用命名空间感知的 `parseLockRequest`，标准 `D:write`/prefixed XML 可解析；Depth 大小写不敏感。                                                                                                                           |
-| A11  | 已修复               | `isDocumentElementNamed` 检查 `documentElement !== null`，无根 XML 由入口作为无效请求处理，不再抛未捕获异常。                                                                                                                  |
-| A12  | 未修复，待兼容评估   | 开发链仍有 Undici 23 条、sharp 3 条公告；不是线上 Worker 运行时依赖。升级 Wrangler/Miniflare 需评估 5.x beta 兼容性，未盲目 overrides。                                                                                        |
+| 编号 | 状态                  | 实施与验证                                                                                                                                                                                                                     |
+| ---- | --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| A01  | 已修复                | `@xmldom/xmldom` 升到 **0.8.15** 并更新锁文件；未采用会破坏对象形式 `errorHandler` 的 0.9.12。修复后 npm audit 不再列出 xmldom。                                                                                               |
+| A02  | 已修复                | 统一 `normalizeDepthHeader`/`parseOverwriteHeader`；在删除目标前校验 Depth 和 Overwrite，集合只接受 0/infinity，无效值返回 400 且目标保留。                                                                                    |
+| A03  | 已修复                | `decodeResourcePath` 对解码后 segment 含 `/`、`\`、NUL 抛 `InvalidResourcePathError`，入口返回 400，避免 sidecar 别名和自移动绕过。                                                                                            |
+| A04  | 已修复                | MOVE 源检查改用递归锁检查；新建 depth infinity 锁先检查后代锁，冲突返回 423；shared 请求只与后代 exclusive 锁冲突。                                                                                                            |
+| A05  | 已修复（守卫串行化）  | 目录 sidecar 首次写用 `etagDoesNotMatch:'*'` 条件创建；新增 R2 CAS 锁变更守卫，所有 LOCK/UNLOCK 状态变更串行化，并发文件/目录 LOCK 只成功一个（201/423）。守卫依赖 lease 与释放；跨 COPY/MOVE 与 LOCK 的原子性仍不在本项范围。 |
+| A06  | 已修复                | DELETE/PROPPATCH 增加 `If-Match`；`If` 条件列表整体求值，假条件在修改前返回 412；条件检查与删除之间的 R2 窗口仍在文档中标注。                                                                                                  |
+| A07  | 已修复（缓解）        | HTML/XHTML/SVG/XML/JS 等活动类型强制 `Content-Disposition: attachment`，覆盖上传的 inline，并加 `X-Content-Type-Options: nosniff` 与 `CSP: sandbox`。                                                                          |
+| A08  | 已修复并提交          | `.gitignore` 不再忽略 `.github/`、`scripts/`、`.gitignore`；workflow Node 20→22。随 `4a85eff` 进入版本库，远端 CI 仍需实际 push 后验证。                                                                                       |
+| A09  | 已修复                | 目录 PROPPATCH 按解析后的 operations 顺序执行 set/remove，不再统一先 set 后 remove。                                                                                                                                           |
+| A10  | 已修复                | LOCK 使用命名空间感知的 `parseLockRequest`，标准 `D:write`/prefixed XML 可解析；Depth 大小写不敏感。                                                                                                                           |
+| A11  | 已修复                | `isDocumentElementNamed` 检查 `documentElement !== null`，无根 XML 由入口作为无效请求处理，不再抛未捕获异常。                                                                                                                  |
+| A12  | 已修复（升级后 0 条） | Wrangler 升至 **4.158.0**，带入 Miniflare 5.20261104.0-beta、Undici 7.30.1、sharp 0.35.5；隔离 audit 0。unit/typecheck/clean `npm ci`/dev smoke 通过；Miniflare 5 beta 兼容性仍属残余风险，未跑 litmus。                       |
 
 验证结果：`npm run test:unit` **156/156 通过**（新增 14 条安全回归），`npx tsc --noEmit` 通过；对修改的源码、测试、配置和四份文档执行 Prettier check 通过。修复后复现脚本确认大小写、无效 Depth 保留目标、MOVE 子树锁、并发文件/目录锁、If/If-Match、prefixed LOCK、rootless XML、PROPPATCH 顺序、SVG/HTML 附件化等行为均已改变；并发文件锁由新增 R2 CAS 守卫串行化；跨 COPY/MOVE 与 LOCK 的原子性仍按上表保留边界。
 
@@ -174,19 +174,19 @@
 
 **修复状态：** A09 已改为按 operations 顺序执行；A10 已用命名空间感知的 `parseLockRequest` 解析 LOCK，标准 `D:` 前缀通过；A11 已加 `documentElement` null 防护，无根 XML 返回无效请求。三者均有回归用例。
 
-## A12：开发工具链公告命中与 bundle 边界
+## A12：开发工具链公告命中、升级结果与 bundle 边界
 
 它们不是线上 Worker 的运行时依赖：应用 `src/` 只导入 xmldom，未配置 Cloudflare Images 绑定，也没有调用 `fetch` 的 `cf.image`。但开发机、CI 和发布流程会执行这些代码，且部分组件被 Wrangler 打包进单文件 CLI，npm audit 的包级计数不会单列这些内嵌模块。
 
-- **Undici 7.28.0（经 Miniflare 传递）：** 官方 OSV 精确版本查询返回 **23 条 GHSA**，覆盖重定向缓存、内容编码/解压、cookie、WebSocket、TLS Agent 选项、SRI、EventSource 等。覆盖本批范围的 7.x 补丁目标至少为 **7.30.1**；部分问题仅在使用相应可选能力时才有意义，不能按 23 条全部计为已到达本项目的执行路径。Miniflare 的 Node 端 HTTP 使用 Undici。
-- **sharp 0.34.5（经 Miniflare 传递）：** 返回 **3 条 GHSA**，来自继承的 libvips/libheif/librsvg 原生库，修复目标分别为 0.35.0、0.35.4、0.35.5；统一以 **0.35.5** 为验收线。只有实际解码不受信图像时才触发相应路径，当前项目没有配置 Images，普通 WebDAV 字节传输不会自动解码。
-- **npm audit 计数：** 两次独立的只读审计都返回 **5 个 high 受影响包条目、36 条独立公告**（10 xmldom + 23 Undici + 3 sharp）；将 xmldom 升到 0.8.15 后，修复后审计为 **4 个 high 包条目、26 条公告**（Undici 23 + sharp 3），保存在 `.tmp/security-audit/npm-audit-post-fix-2026-11-07.json`。Miniflare/Wrangler 是传导条目，不重复计数。普通响应 `fixAvailable: false`、隔离 lockfile 响应为 true，该布尔值不能替代精确补丁版本。
-- **bundle 单列：** Wrangler 的发布说明涉及已打包组件的修复，锁文件不按内嵌模块逐项列出。已在 `node_modules/wrangler/wrangler-dist/cli.js` 中读到实际内嵌版本（例如 `yaml@2.8.1`、`minimatch@5.1.6`、`brace-expansion@2.0.1`），这些组件也存在版本范围命中；是否可利用取决于 bundle 是否包含受影响函数及调用链，逐项判断见开发链补核报告。不能把 npm 的 36 条当成完整清单，也不能假设升级 CLI 就一定已覆盖全部内嵌依赖。
+- **Undici 7.28.0（升级前的 Miniflare 传递版本）：** 官方 OSV 精确版本查询返回 **23 条 GHSA**，覆盖重定向缓存、内容编码/解压、cookie、WebSocket、TLS Agent 选项、SRI、EventSource 等。覆盖本批范围的 7.x 补丁目标至少为 **7.30.1**；部分问题仅在使用相应可选能力时才有意义，不能按 23 条全部计为已到达本项目的执行路径。Miniflare 的 Node 端 HTTP 使用 Undici。
+- **sharp 0.34.5（升级前的 Miniflare 传递版本）：** 返回 **3 条 GHSA**，来自继承的 libvips/libheif/librsvg 原生库，修复目标分别为 0.35.0、0.35.4、0.35.5；统一以 **0.35.5** 为验收线。只有实际解码不受信图像时才触发相应路径，当前项目没有配置 Images，普通 WebDAV 字节传输不会自动解码。
+- **npm audit 计数：** 两次独立的只读审计都返回 **5 个 high 受影响包条目、36 条独立公告**（10 xmldom + 23 Undici + 3 sharp）；将 xmldom 升到 0.8.15 后，修复后审计为 **4 个 high 包条目、26 条公告**（Undici 23 + sharp 3），保存在 `.tmp/security-audit/npm-audit-post-fix-2026-11-07.json`。Miniflare/Wrangler 是传导条目，不重复计数。普通响应 `fixAvailable: false`、隔离 lockfile 响应为 true，该布尔值不能替代精确补丁版本。升级 Wrangler 4.158.0 后，隔离审计为 **0 条**，见下一段。
+- **bundle 单列：** Wrangler 的发布说明涉及已打包组件的修复，锁文件不按内嵌模块逐项列出。升级前曾在旧 `node_modules/wrangler/wrangler-dist/cli.js` 中读到内嵌版本（例如 `yaml@2.8.1`、`minimatch@5.1.6`、`brace-expansion@2.0.1`），这些组件也存在版本范围命中；4.158.0 的 bundle 内容已改变，仍需按新 CLI 复核，不能把旧读取结果或 npm 的 36 条当成完整清单，也不能假设升级 CLI 就一定已覆盖全部内嵌依赖。
 - **workerd：** 官方公告中的 [GHSA-8vx6-69vg-c46f](https://github.com/cloudflare/workerd/security/advisories/GHSA-8vx6-69vg-c46f)（CVE-2023-2512）影响 `<1.20230419.0`，当前锁定版本早已超出，且官方说明在 Workers 资源限制下从未可利用；不把它算作当前未修复项。开发链补核报告另列该系统公告中与本项目版本无关或已修复的其余条目。
 
-**建议：** 选用同时包含 Undici ≥7.30.1、sharp ≥0.35.5 及适用 bundle 修复的兼容 Wrangler/Miniflare 发行版，审阅升级后的依赖树与 bundle，再复跑 `npm audit`、unit/check 和 litmus。不要用 overrides 盲目跨大版本；已核实的 Wrangler 4.158.0 使用 Miniflare `5.20261104.0-beta`，升级自身需要兼容性评估。
+**升级结果（2026-11-07）：** 已将 `wrangler` 升至 **4.158.0**，锁文件带入 `miniflare 5.20261104.0-beta`、`undici 7.30.1`、`sharp 0.35.5`、`workerd 1.20261104.1`、`esbuild 0.28.2`。`npm ci` 从干净安装成功，`npx tsc --noEmit` 通过，`npm run test:unit` **156/156** 通过，本地 `wrangler dev` 的 `PROPFIND / Depth:0` 返回 207；升级后隔离 `npm audit --package-lock-only` 为 **exit 0、0 条**。这消除的是 npm 可见的开发链公告，不等于 bundle 内嵌模块和所有上游代码已被证明无风险。
 
-**修复状态：** 未升级。A12 不直接部署进 Worker 运行时，但开发机和 CI 会执行；在未验证 Miniflare 5 beta 兼容性前不使用 overrides 或强制跨版本更新。修复后审计仍为 26 条，作为已知开发链风险保留。
+**残余边界：** Miniflare 5 仍是 beta，Wrangler 4.158.0 的兼容性尚未经过 litmus 和长时间运行验证；bundle 内嵌组件仍需按实际 4.158.0 CLI 重新核对，不能把 npm 0 条当成完整清单。升级前 26 条与升级后 0 条均保留为历史对照。
 
 ## 后门与供应链检查结果
 
@@ -205,12 +205,14 @@
 | `npm run check`（全量）                               | 修复前 Prettier 因原有未跟踪 `.agents/`、`.forge/` 和 `skills-lock.json` 共 23 个文件失败；本次对修改文件单独 check 通过 |
 | 对 Git 已跟踪的 TS/JS/JSON/Markdown 做 Prettier check | **通过**，用于定位全量格式失败的来源                                                                                     |
 | 只读 `npm audit`（网络恢复后两次）                    | exit 1；**5 个 high 包条目、36 条独立公告**，是漏洞结果，不是执行错误                                                    |
-| 修复后隔离 `npm audit`                                | exit 1；xmldom 已消失，仍为 **4 个 high 包条目、26 条开发链公告**                                                        |
+| 修复后隔离 `npm audit`（升级 Wrangler 前）            | exit 1；xmldom 已消失，仍为 **4 个 high 包条目、26 条开发链公告**                                                        |
+| 升级 Wrangler 4.158.0 后隔离 `npm audit`              | **exit 0；0 条公告**；Miniflare 5 beta 仍需兼容性验证                                                                    |
+| `npm ci` 干净安装 + unit/typecheck + dev smoke        | 通过；156/156、tsc 通过、`PROPFIND / Depth:0` 返回 207                                                                   |
 | `main-repro.mjs`                                      | 通过；鉴权入口下条件请求、内容响应、文件锁及路径别名重现                                                                 |
 | `reviewer-repro.mjs` / `post-fix-repro.mjs`           | 初版通过并重现错误；修复后版本验证 Depth、子树锁、If、LOCK、PROPPATCH 等新行为                                           |
 | `xml-complexity-repro.mjs`                            | 通过；128 MiB 堆上限下受控性能测量                                                                                       |
 | `local-r2-repro.mjs`                                  | 最终通过；本地 R2 确认内容 ETag、过期删除、无效 COPY、文件排他锁竞争和路径别名                                           |
-| 业务代码、依赖、配置、已有测试 Git diff               | **已修改**：A01–A11 修复、xmldom 0.8.15、CI/忽略规则、156 条测试；随本次安全修复提交纳入版本库                           |
+| 业务代码、依赖、配置、已有测试 Git diff               | A01–A11、xmldom 0.8.15、CI/忽略规则、156 条测试已提交 `4a85eff`；Wrangler 4.158.0 升级已提交 `423fac2`                   |
 | 生产/远程 R2、部署、正式迁移、litmus                  | 未运行；没有访问生产凭据或数据                                                                                           |
 
 复现文件在 `.tmp/security-audit/`，不进入版本控制。先从项目根目录运行 `npm run test:unit` 生成 `.tmp/test-build`，再运行：
@@ -224,7 +226,7 @@ node .tmp/security-audit/local-r2-repro.mjs
 
 初版复现脚本的断言确认当时错误行为，不能直接作为修复后应继续通过的期望测试；修复后使用 `post-fix-repro.mjs` 和新增回归测试验证新行为。`local-r2-repro.mjs` 使用隔离目录 `.tmp/security-audit/r2-local` 和本地 Miniflare/workerd；Node 与 workerd 代理传输会丢失已知长度 stream 标记，首次尝试因此失败。最终版本仅在测试代理边界把 stream 缓冲为已知长度字节，保留真实 R2 条件、ETag 与 metadata 行为，重跑成功；未把首次传输适配异常误报为生产缺陷。
 
-初次审计 JSON 保存在 `.tmp/security-audit/npm-audit.json`（1 包、10 条，SHA256 `5b514db38d7409aedb2fe20dd81b53b52caed0e4c338579aebbf69be3b082249`），作为历史响应保留。网络恢复后的普通审计保存在 `.tmp/security-audit/npm-audit-online-2026-11-07.json`（SHA256 `4cbd8deddebfa387a98cd68ca0ab58a9fd491f639abdb6fbc16b7b20081e3fe0`），隔离 lockfile 审计保存在 `.tmp/security-audit/npm-audit-online-lock-only-2026-11-07.json`（SHA256 `a51792850f1808b07eb7e09c2bc080260c155216ab88f8162df58915268d0851`），两者均为 5 包条目、36 条公告。修复后隔离审计保存在 `.tmp/security-audit/npm-audit-post-fix-2026-11-07.json`（513 行，SHA256 `90910300e845fd74366975f989d84e3561a35b9cc4fe2625bf4dbb81c9220412`），4 包条目、26 条公告。CVE、公开日期与精确 patched version 来自官方公告补核，不写回初次 JSON。
+初次审计 JSON 保存在 `.tmp/security-audit/npm-audit.json`（1 包、10 条，SHA256 `5b514db38d7409aedb2fe20dd81b53b52caed0e4c338579aebbf69be3b082249`），作为历史响应保留。网络恢复后的普通审计保存在 `.tmp/security-audit/npm-audit-online-2026-11-07.json`（SHA256 `4cbd8deddebfa387a98cd68ca0ab58a9fd491f639abdb6fbc16b7b20081e3fe0`），隔离 lockfile 审计保存在 `.tmp/security-audit/npm-audit-online-lock-only-2026-11-07.json`（SHA256 `a51792850f1808b07eb7e09c2bc080260c155216ab88f8162df58915268d0851`），两者均为 5 包条目、36 条公告。修复后隔离审计保存在 `.tmp/security-audit/npm-audit-post-fix-2026-11-07.json`（513 行，SHA256 `90910300e845fd74366975f989d84e3561a35b9cc4fe2625bf4dbb81c9220412`），4 包条目、26 条公告。Wrangler 4.158.0 升级后的隔离审计保存在 `.tmp/security-audit/npm-audit-wrangler-upgrade-2026-11-07.json`（22 行，SHA256 `4b1f5dc8672b8c30f077bec9ffba09fd8ecd0798d16dc9b4c946877aec8abdd3`），`metadata.vulnerabilities.total = 0`。CVE、公开日期与精确 patched version 来自官方公告补核，不写回初次 JSON。
 
 ## 资料局限与修复顺序
 
@@ -232,4 +234,4 @@ node .tmp/security-audit/local-r2-repro.mjs
 
 仍需保留的边界：没有生产 R2/部署产物访问，不能证明实际托管实例的补丁状态；没有穷举未公开或所有第三方漏洞情报；没有进行真实浏览器脚本执行实验或线上 DoS 实验；bundle 的可利用性只按已读代码和调用链判断，未做完整反编译审计。没有把 npm 未命中、精确版本范围命中或公告计数等同于实际可利用性。
 
-优先顺序：A01–A04、A06–A11 已在本工作树完成；A08 的脚本/CI 已随本次安全修复提交纳入版本库。A05 已用 R2 CAS 守卫串行化 LOCK/UNLOCK；仍应评估把守卫扩展为跨 COPY/MOVE 的事务边界，或改用 Durable Object；A12 需在兼容性评估后升级 Wrangler/Miniflare，再复跑 unit/check 和本地 litmus。每项修复应以本报告的触发条件反写最小回归，再跑现有 unit、check 和相关 litmus 套件。
+优先顺序：A01–A04、A06–A11 已在本工作树完成；A08 的脚本/CI 已随本次安全修复提交纳入版本库。A05 已用 R2 CAS 守卫串行化 LOCK/UNLOCK；仍应评估把守卫扩展为跨 COPY/MOVE 的事务边界，或改用 Durable Object；A12 已升级 Wrangler 4.158.0 并取得 npm audit 0，但 Miniflare 5 beta 仍需 litmus 与长时间运行验证。每项修复应以本报告的触发条件反写最小回归，再跑现有 unit、check 和相关 litmus 套件。

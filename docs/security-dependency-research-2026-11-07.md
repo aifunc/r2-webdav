@@ -1,14 +1,14 @@
 # 依赖与供应链安全研究：2026-11-07
 
-查询及网络恢复后补核日期：**2026-11-07，Asia/Shanghai（UTC+08:00）**。对象为当前工作区的 TypeScript / Cloudflare Worker WebDAV 项目。以第一方资料、实际锁定版本和应用调用路径为依据；补核阶段不修改应用、依赖或配置，后续修复实施阶段单独更新了 xmldom 和锁文件。仓库已有 `docs/superpowers/` 下的日期化设计记录；本报告放在 `docs/` 根目录。
+查询及网络恢复后补核日期：**2026-11-07，Asia/Shanghai（UTC+08:00）**。对象为当前工作区的 TypeScript / Cloudflare Worker WebDAV 项目。以第一方资料、实际锁定版本和应用调用路径为依据；补核阶段不修改应用、依赖或配置，后续修复实施阶段单独更新了 xmldom、Wrangler 和锁文件。仓库已有 `docs/superpowers/` 下的日期化设计记录；本报告放在 `docs/` 根目录。
 
-**修复实施后的变化（2026-11-07）：** 本工作树已将 `@xmldom/xmldom` 从 0.8.13 升到 **0.8.15** 并更新锁文件，未采用会破坏对象形式 `errorHandler` 的 0.9.12。修复后隔离 `npm audit --package-lock-only` 仍 exit 1，但只剩 **4 个 high 受影响包条目、26 条独立公告**（Undici 23 + sharp 3）；xmldom 已不再出现。结果保存在 `.tmp/security-audit/npm-audit-post-fix-2026-11-07.json`。该报告其余“0.8.13/36 条”段落是修复前快照，保留用于追溯，不应作为当前工作树状态。
+**修复实施后的变化（2026-11-07）：** 本工作树已将 `@xmldom/xmldom` 从 0.8.13 升到 **0.8.15** 并更新锁文件，未采用会破坏对象形式 `errorHandler` 的 0.9.12。只升 xmldom 时隔离 `npm audit --package-lock-only` 仍 exit 1，剩 **4 个 high 受影响包条目、26 条独立公告**（Undici 23 + sharp 3），结果保存在 `.tmp/security-audit/npm-audit-post-fix-2026-11-07.json`。随后把 `wrangler` 升到 **4.158.0**（提交 `423fac2`），锁文件带入 Miniflare `5.20261104.0-beta`、Undici **7.30.1**、sharp **0.35.5**；隔离审计变为 **exit 0、0 条**，保存在 `.tmp/security-audit/npm-audit-wrangler-upgrade-2026-11-07.json`。`npm ci`、`tsc --noEmit`、156 条单测和本地 dev `PROPFIND` 均通过。该报告其余“0.8.13/36 条/26 条”段落是升级前快照，保留用于追溯，不应作为当前工作树状态。
 
 ## 结论与证据强度
 
 1. **优先处理线上 XML 解析依赖。** `@xmldom/xmldom` 初版实际锁定并已安装 **0.8.13**，命中 **10 条 GHSA（npm 分级为 8 high、2 moderate）**，包含二次 CPU/内存复杂度问题。网络恢复后已取得完整官方公告、CVE 和发布信息：覆盖这批公告的 0.8 分支修复版本为 **0.8.15**，0.9 分支对应 **0.9.12**，均已正式发布；部分序列化防护仍须显式启用 `requireWellFormed`。0.9.12 不再支持应用当前使用的对象形式 `errorHandler`，需要适配，当前兼容更新首选 0.8.15。**修复实施后已升到 0.8.15。** `PROPFIND`、`PROPPATCH` 可把已认证用户的 XML 送进解析器；1 MiB 请求体上限与先鉴权不能证明算法型 DoS 已消除。本研究未对线上 Worker 发起攻击或证明跨 isolate 影响。
 2. **CI 存在确定的版本冲突与交付缺口。** 本地 workflow 选择 Node **20**，Wrangler **4.113.0** / Miniflare **4.20260721.0** 要求 Node **≥22.0.0**，Wrangler 启动入口还会对 Node <22 主动退出。官方支持周期现已补核，Node 20 于 **2026-04-30** 结束支持。本地 `.github/`、`scripts/` 被忽略且不在当前 Git 索引中，不能将这些本地文件视为已交付的 CI 控制。
-3. **开发依赖也有官方公告命中，最新 npm audit 已确认。** 精确版本查询命中 **Undici 7.28.0 的 23 条 GHSA** 和 **sharp 0.34.5 的 3 条 GHSA**。网络恢复后，普通只读审计与关闭用户/全局配置的独立 lockfile 审计均返回 **5 个 high 受影响包条目、36 条独立 GHSA（18 high、15 moderate、3 low）**；5 个包条目含风险传导到的 Miniflare/Wrangler。初次仅返回 xmldom 的 10 条是历史响应，不能作为当前完整结论；修复掉 xmldom 后为 **4 个 high 包条目、26 条公告**。开发链命中不等于线上 WebDAV 可利用；默认本地开发监听 `0.0.0.0`、迁移工具可获取远程 R2 代理，仍须评估开发主机与凭据边界。完整列表、修复版本及功能可达性见 [Cloudflare 开发链补核](security-cloudflare-verification-2026-11-07.md)。
+3. **开发依赖也有官方公告命中，最新 npm audit 已确认。** 精确版本查询命中 **Undici 7.28.0 的 23 条 GHSA** 和 **sharp 0.34.5 的 3 条 GHSA**。网络恢复后，普通只读审计与关闭用户/全局配置的独立 lockfile 审计均返回 **5 个 high 受影响包条目、36 条独立 GHSA（18 high、15 moderate、3 low）**；5 个包条目含风险传导到的 Miniflare/Wrangler。初次仅返回 xmldom 的 10 条是历史响应，不能作为当前完整结论；修复掉 xmldom 后为 **4 个 high 包条目、26 条公告**，升级 Wrangler 4.158.0 后为 **0 条**。开发链命中不等于线上 WebDAV 可利用；默认本地开发监听 `0.0.0.0`、迁移工具可获取远程 R2 代理，仍须评估开发主机与凭据边界。完整列表、修复版本及功能可达性见 [Cloudflare 开发链补核](security-cloudflare-verification-2026-11-07.md)。
 4. **已核实两个 actions SHA 的上游身份。** checkout 和 setup-node 的所固定提交均对应各自官方仓库的 **v4.4.0**；checkout 该版本的 `persist-credentials` 默认 **true**。锁文件 93 个包条目的 `resolved` 均为 npm 官方 HTTPS registry，均有 `sha512` integrity；安装 hooks、二进制回退路径及安装后文件的信任边界仍不能由这些字段替代验证。
 5. **原有网页抓取故障已恢复，搜索凭据问题仍存在。** 已直接取回 GitHub、npm registry、CVE、NVD、Node.js 等第一方资料，补全下文明确列出的公告、版本、日期和 actions 身份。`web_search` 仍因缺少 `DEEPSEEK_API_KEY` 失败；本次通过直接访问官方 API 和文档完成补核。Cloudflare 托管实例的实际补丁状态、完整漏洞情报及未公开公告仍不属于已验证结论。
 
@@ -16,7 +16,7 @@
 
 已读取 `AGENTS.md`、`package.json`、完整 `package-lock.json`（lockfile v3）、`wrangler.toml`、本地 `.github/workflows/litmus.yml` / `CODEOWNERS`、三个 `scripts/` 文件、应用入口与 XML 处理路径。进一步静态读取了已安装 npm 包的 manifest、xmldom 发行说明和相关库源码、Wrangler Node 版本门禁及安装 hooks；网络恢复后又以官方 API 和发行页补核了公告、CVE、日期与版本，本地缓存内容仅作为对照。
 
-补核研究阶段未执行 `npm install`、`npm ci`、`npm audit fix`、项目部署或迁移；未运行 Wrangler、esbuild、workerd 原生二进制，未执行无关未跟踪文件。未读取 `.dev.vars`、Cloudflare 凭据或用户 npm 配置，不输出环境变量。npm 审计使用独立缓存、关闭 hooks、禁用用户/全局 npm 配置并移除常见 npm token 环境变量。后续修复实施阶段只在本地 cache 安装 `@xmldom/xmldom@0.8.15` 并更新锁文件，未升级其他依赖。成功命令如下：
+补核研究阶段未执行 `npm install`、`npm ci`、`npm audit fix`、项目部署或迁移；未运行 Wrangler、esbuild、workerd 原生二进制，未执行无关未跟踪文件。未读取 `.dev.vars`、Cloudflare 凭据或用户 npm 配置，不输出环境变量。npm 审计使用独立缓存、关闭 hooks、禁用用户/全局 npm 配置并移除常见 npm token 环境变量。后续修复实施阶段先在本地 cache 安装 `@xmldom/xmldom@0.8.15` 并更新锁文件；之后在工作树中安装 `wrangler@4.158.0`，未部署、未迁移。成功命令如下：
 
 ```sh
 # 最终隔离 lockfile 审计（普通非隔离审计另以 npm audit --json --ignore-scripts 运行）
@@ -33,13 +33,13 @@ env -u NODE_OPTIONS -u NPM_TOKEN -u NODE_AUTH_TOKEN \
 
 **历史记录与最终补核结果：** 初次退出码 1 的响应为 `auditReportVersion: 2`、1 个 high 包、10 条 xmldom 公告，保存在 `.tmp/security-audit/npm-audit.json`。此前保存的 `.tmp/network-recheck-npm-audit.json` 也曾返回相同结果。它们反映当次响应，不能覆盖后续查询。最终重新执行 `npm audit --json --ignore-scripts`，并另以以上隔离参数执行一次 `--package-lock-only` 审计（globalconfig/cache 改为仓库 `.tmp/security-audit/` 内不同路径），两次均返回 **5 个 high 包条目、36 条独立 GHSA**；退出码 1 是漏洞结果，不是命令故障。普通响应的 `fixAvailable` 为 false，隔离 lockfile 响应为 true，具体修复版本以已读取的上游公告和发布信息为准，不能从这个布尔字段推导。
 
-最新普通审计保存为 `.tmp/security-audit/npm-audit-online-2026-11-07.json`，SHA256 `4cbd8deddebfa387a98cd68ca0ab58a9fd491f639abdb6fbc16b7b20081e3fe0`；独立 lockfile 审计保存为 `.tmp/security-audit/npm-audit-online-lock-only-2026-11-07.json`，SHA256 `a51792850f1808b07eb7e09c2bc080260c155216ab88f8162df58915268d0851`。10+23+3 是独立公告数；Miniflare/Wrangler 的传导条目不重复计数。审计仅向 npm registry 发送依赖名称/版本信息，不发送项目源码或应用凭据。
+最新普通审计保存为 `.tmp/security-audit/npm-audit-online-2026-11-07.json`，SHA256 `4cbd8deddebfa387a98cd68ca0ab58a9fd491f639abdb6fbc16b7b20081e3fe0`；独立 lockfile 审计保存为 `.tmp/security-audit/npm-audit-online-lock-only-2026-11-07.json`，SHA256 `a51792850f1808b07eb7e09c2bc080260c155216ab88f8162df58915268d0851`。只升 xmldom 后的隔离审计为 `.tmp/security-audit/npm-audit-post-fix-2026-11-07.json`（4 包、26 条，SHA256 `90910300e845fd74366975f989d84e3561a35b9cc4fe2625bf4dbb81c9220412`）；Wrangler 4.158.0 升级后的隔离审计为 `.tmp/security-audit/npm-audit-wrangler-upgrade-2026-11-07.json`（22 行，SHA256 `4b1f5dc8672b8c30f077bec9ffba09fd8ecd0798d16dc9b4c946877aec8abdd3`，0 条）。10+23+3 是升级前独立公告数；Miniflare/Wrangler 的传导条目不重复计数。审计仅向 npm registry 发送依赖名称/版本信息，不发送项目源码或应用凭据。
 
-补核研究阶段没有运行源码回归测试：它不改变实现，目标是静态依赖/供应链研究，当时 `git diff --exit-code -- package.json package-lock.json wrangler.toml src .github scripts` 无差异。后续修复实施独立修改了源码、测试、xmldom 和锁文件，并运行 `npm run test:unit`（156/156）、`npx tsc --noEmit` 及修改文件的 Prettier check；这些结果见主审计报告的“修复实施状态”，不混入补核研究的静态结论。
+补核研究阶段没有运行源码回归测试：它不改变实现，目标是静态依赖/供应链研究，当时 `git diff --exit-code -- package.json package-lock.json wrangler.toml src .github scripts` 无差异。后续修复实施独立修改了源码、测试、xmldom、Wrangler 和锁文件，并运行 `npm ci`、`npm run test:unit`（156/156）、`npx tsc --noEmit`、本地 dev smoke 及修改文件的 Prettier check；这些结果见主审计报告的“修复实施状态”，不混入补核研究的静态结论。
 
 ## 实际版本与依赖链
 
-以下版本取自 lockfile，并与已安装的核心包 manifest 对照。`package.json` 中的声明范围不能替代这些实际版本。
+下表是 **升级前快照**；升级后的当前值见紧随其后的第二张表。`package.json` 中的声明范围不能替代这些实际版本。
 
 | 包 / 声明范围                        | 实际版本                  | 依赖链、用途                                                                             | 仓库证据                                                                                                          |
 | ------------------------------------ | ------------------------- | ---------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
@@ -55,8 +55,21 @@ env -u NODE_OPTIONS -u NPM_TOKEN -u NODE_AUTH_TOKEN \
 | `unenv` / `@cloudflare/unenv-preset` | **2.0.0-rc.24 / 2.16.1**  | Wrangler 的 Node 兼容打包支持                                                            | `package-lock.json:30`、`package-lock.json:1490`、`package-lock.json:1529`                                        |
 | `youch` / `cookie`                   | **4.1.0-beta.10 / 1.1.1** | `wrangler → miniflare → youch → cookie`，开发错误页链                                    | `package-lock.json:1348`、`package-lock.json:1579`、`package-lock.json:1589`                                      |
 | `@cloudflare/workers-types` / `*`    | **5.20260722.1**          | 根 devDependency；TypeScript 类型输入                                                    | `package-lock.json:131`、`tsconfig.json:36`                                                                       |
-| `prettier` / `^3.1.1`                | **3.3.3**                 | 根 devDependency，格式化                                                                 | `package-lock.json:1371`                                                                                          |
-| `typescript` / `^5.0.4`              | **5.6.3**                 | 根 devDependency，编译/静态检查                                                          | `package-lock.json:1466`                                                                                          |
+| `prettier` / `^3.1.1`                | **3.3.3**                 | 根 devDependency，格式化                                                                 | `package-lock.json:1405`                                                                                          |
+| `typescript` / `^5.0.4`              | **5.6.3**                 | 根 devDependency，编译/静态检查                                                          | `package-lock.json:1505`                                                                                          |
+
+**升级后的当前值（2026-11-07，Wrangler 4.158.0）：**
+
+| 包 / 声明范围                | 当前版本              | 依赖链、用途                                          | 仓库证据                                                                                  |
+| ---------------------------- | --------------------- | ----------------------------------------------------- | ----------------------------------------------------------------------------------------- |
+| `@xmldom/xmldom` / `^0.8.15` | **0.8.15**            | 根 production dependency；解析 PROPFIND/PROPPATCH XML | `package.json:22`、`package-lock.json:1256`、`src/webdav/xml.ts:1`                        |
+| `wrangler` / `^4.158.0`      | **4.158.0**           | 根 devDependency；开发、构建、部署、迁移脚本          | `package.json:19`、`package-lock.json:1560`、`scripts/migrate-directory-sidecars.mjs:495` |
+| `miniflare`                  | **5.20261104.0-beta** | `wrangler → miniflare`，本地模拟器；beta 需兼容性验证 | `package-lock.json:1373`、`:1560`                                                         |
+| `workerd`                    | **1.20261104.1**      | `wrangler → miniflare → workerd`；本地运行时          | `package-lock.json:1539`、`:1560`                                                         |
+| `undici`                     | **7.30.1**            | `wrangler → miniflare → undici`，Node 端 HTTP 客户端  | `package-lock.json:1519`、`:1560`                                                         |
+| `sharp`                      | **0.35.5**            | `wrangler → miniflare → sharp`；libvips 本地平台包    | `package-lock.json:1434`、`:1560`                                                         |
+| `esbuild`                    | **0.28.2**            | `wrangler → esbuild`，打包工具与平台二进制            | `package-lock.json:1306`、`:1560`                                                         |
+| `@cloudflare/workers-types`  | **5.20261107.1**      | 根 devDependency；TypeScript 类型输入                 | `package.json:17`、`package-lock.json:131`                                                |
 
 本地同版本 manifest 示例：`node_modules/wrangler/package.json:3`、`node_modules/miniflare/package.json:3`、`node_modules/undici/package.json:3`、`node_modules/ws/package.json:3`、`node_modules/@xmldom/xmldom/package.json:3`。本次没有重新下载 tarball，也没有对已安装文件逐一重算 tarball integrity；版本一致性不等同于本地依赖目录来源已验证。
 
@@ -90,7 +103,7 @@ env -u NODE_OPTIONS -u NPM_TOKEN -u NODE_AUTH_TOKEN \
 - `LOCK` 在 `src/webdav/methods/locking.ts:65` 至 `:70` 通过正则和 owner 提取逻辑处理，不走这里的 xmldom DOMParser；不能把所有接收 XML 的方法统一算作这些 GHSA 的入口。
 - `src/webdav/xml.ts:154` 至 `:157` 拒绝 dead property 中 DAV 命名空间后代，有助于约束协议注入，却不是解析器 CPU/内存问题的修复。
 
-**修复方向（已核实版本，未执行升级）：** npm 官方元信息及上游公告确认，同分支最小候选为 **0.8.15**；**0.9.12** 也是已发布的修复版本，但不是当前代码可直接替换的候选：[0.9.12 DOMParser 源码](https://raw.githubusercontent.com/xmldom/xmldom/0.9.12/lib/dom-parser.js) 对对象形式的 `errorHandler` 主动抛出 `TypeError`，而 `src/webdav/xml.ts:169` 正在使用该形式，迁移时必须适配 `onError` 及异常处理。应先在 0.8 分支最小化更新 dependency/lockfile，复测 PROPFIND/PROPPATCH、XML 往返和错误输入。部分序列化防护仍是 opt-in：0.8 分支 `XMLSerializer.serializeToString(node, isHtml, nodeFilter, options)` 的 options 为第 4 参数，`child.toString(isHtml, nodeFilter, options)` 则为第 3 参数；当前 `child.toString()` 没有启用 `requireWellFormed`。版本升级、序列化校验与应用可达性须分别验证，仅启用该选项不能代替解析器 DoS 修复。详见下文官方补核表及 [0.8.15 DOM 源码](https://raw.githubusercontent.com/xmldom/xmldom/0.8.15/lib/dom.js)。
+**修复落地（已核实版本，已执行升级）：** npm 官方元信息及上游公告确认，同分支最小候选为 **0.8.15**；**0.9.12** 也是已发布的修复版本，但不是当前代码可直接替换的候选：[0.9.12 DOMParser 源码](https://raw.githubusercontent.com/xmldom/xmldom/0.9.12/lib/dom-parser.js) 对对象形式的 `errorHandler` 主动抛出 `TypeError`，而 `src/webdav/xml.ts:169` 正在使用该形式，迁移时必须适配 `onError` 及异常处理。已先在 0.8 分支最小化更新 dependency/lockfile 到 0.8.15，并复测 PROPFIND/PROPPATCH、XML 往返和错误输入。部分序列化防护仍是 opt-in：0.8 分支 `XMLSerializer.serializeToString(node, isHtml, nodeFilter, options)` 的 options 为第 4 参数，`child.toString(isHtml, nodeFilter, options)` 则为第 3 参数；当前 `child.toString()` 没有启用 `requireWellFormed`。版本升级、序列化校验与应用可达性须分别验证，仅启用该选项不能代替解析器 DoS 修复。详见下文官方补核表及 [0.8.15 DOM 源码](https://raw.githubusercontent.com/xmldom/xmldom/0.8.15/lib/dom.js)。
 
 ## 已包含的历史修复与条件性修复
 
@@ -106,12 +119,14 @@ env -u NODE_OPTIONS -u NPM_TOKEN -u NODE_AUTH_TOKEN \
 ## 开发 Wrangler / Miniflare 与 Cloudflare 托管边界
 
 - `wrangler.toml:2` 指向 `src/index.ts`；`:5` 开启 `nodejs_compat`；唯一外部应用解析依赖如上。Wrangler/Miniflare 的 Node HTTP 客户端 Undici、WebSocket ws 和 sharp 的本地原生库不因出现在 npm lockfile 中就自动成为线上 WebDAV 处理路径。
-- `workerd 1.20260721.1` 是 npm 开发链中的本地运行时版本（`package-lock.json:1500`）。**不能从它推导 Cloudflare 线上基础设施的确切运行时版本、补丁状态或某条上游 workerd 公告是否影响该线上 Worker。** `wrangler.toml:1` 的 `compatibility_date = "2023-10-16"` 也不能作为线上补丁版本证据。网络恢复后已取得 Cloudflare 官方安全模型和公开公告，但它们没有提供本项目实际托管实例的运行时/补丁清单，仍不能独立验证该实例的具体补丁状态。
+- `workerd 1.20261104.1` 是升级后 npm 开发链中的本地运行时版本（`package-lock.json:1539`）。**不能从它推导 Cloudflare 线上基础设施的确切运行时版本、补丁状态或某条上游 workerd 公告是否影响该线上 Worker。** `wrangler.toml:1` 的 `compatibility_date = "2023-10-16"` 也不能作为线上补丁版本证据。网络恢复后已取得 Cloudflare 官方安全模型和公开公告，但它们没有提供本项目实际托管实例的运行时/补丁清单，仍不能独立验证该实例的具体补丁状态。
 - `scripts/wrangler-dev.sh:13` 默认 `--ip 0.0.0.0`，`package.json:7` / `:8` 将 dev/start 指向该脚本。本地服务会对可到达该监听端口的主机开放，实际边界还取决于 Docker 映射/防火墙；这是一项明确的开发配置暴露面，不能仅因 devDependency 不部署便忽略。建议普通主机开发默认 loopback，容器需要时再明确设置 `WRANGLER_DEV_IP`。
 - `scripts/wrangler-dev.sh:7` / `:11` 和迁移脚本 `:494` 把默认 XDG 配置位置放到 `.tmp/xdg`，已有 `XDG_CONFIG_HOME` 仍会被保留；这只调整默认目录，不是隔离或访问控制机制。迁移脚本 `:495` 导入 Wrangler，`:504` 检查 remote 配置，`:510` 获取 platform proxy，正式模式会写/删对象（`:553` / `:554`）。本研究未运行它。
-- 最新两次 npm audit 与 OSV/GitHub 精确版本查询均确认 `undici 7.28.0`、`sharp 0.34.5` 存在公告命中，风险传导到 Miniflare/Wrangler。Undici 7.x 覆盖本次命中的补丁目标至少 **7.30.1**，sharp 至少 **0.35.5**；应选用实际包含这些版本或等效修复的兼容 Wrangler/Miniflare 发行版，并审阅更新后的锁文件，不能假设更新 CLI 一定已覆盖传递依赖。未确认当前 WebDAV 实现会触发全部 26 条开发链公告。其他精确版本查询为空的结果也不构成安全保证。
+- 升级前两次 npm audit 与 OSV/GitHub 精确版本查询均确认 `undici 7.28.0`、`sharp 0.34.5` 存在公告命中，风险传导到 Miniflare/Wrangler。Undici 7.x 覆盖本次命中的补丁目标至少 **7.30.1**，sharp 至少 **0.35.5**；当前已升级到包含这些版本的 Wrangler 4.158.0/Miniflare 5 beta，升级后隔离 audit 为 0。仍不能假设升级 CLI 一定覆盖全部 bundle 内嵌模块；未确认当前 WebDAV 实现会触发全部 26 条升级前公告。其他精确版本查询为空的结果也不构成安全保证。
 
 ## 供应链与 CI 的具体检查
+
+> 安装器行为表保留升级前版本号作为历史快照；Wrangler 4.158.0 更换了 esbuild/workerd 版本，未对其安装脚本逐行重新审计。
 
 ### 1. 本地 CI 与关键脚本没有纳入当前版本控制（优先恢复交付）
 
@@ -175,7 +190,7 @@ env -u NODE_OPTIONS -u NPM_TOKEN -u NODE_AUTH_TOKEN \
 1. **线上优先：** 采用已核实的兼容补丁目标 **xmldom 0.8.15**，最小化更新 dependency/lockfile；序列化修复中依赖 `requireWellFormed` 的部分须显式采用该选项，不能只升级版本。验证 PROPFIND/PROPPATCH、dead property XML 往返和错误处理，并用有资源上限的专门用例验证解析复杂度；无需向生产发攻击请求。属性数、嵌套深度/命名空间声明总量限制和遇错及时终止可作为额外防线。
 2. **CI 优先：** 恢复关键脚本与 workflow 的 tracked 状态，把 Node 与 Wrangler 支持范围对齐；实际执行已有 unit/typecheck/format/litmus 门禁，避免只在本地拥有这些保护。核实 actions SHA 的上游身份并维持定期更新。
 3. **开发与安装：** 按使用场景约束开发监听地址和远程 R2 访问；避免缺包时 npx 隐式获取工具。将安装、构建、部署凭据边界分离，保留对确有需要的 hooks 的审阅记录；避免使用 `--omit=optional` 迫使平台二进制进入下载回退。
-4. **开发链更新验收：** 选用实际包含 Undici ≥7.30.1、sharp ≥0.35.5 及适用 bundle 修复的兼容工具发行版，审阅依赖树和打包组件，再复跑 npm audit、unit/check 和本地 litmus。不要盲目用 overrides 强行跨版本；核实到的 Wrangler 4.158.0 使用 Miniflare `5.20261104.0-beta`，升级本身需要兼容性评估。已完成本次官方资料补核；生产部署身份与实际平台修补状态仍需账号内证据。
+4. **开发链更新验收（已执行）：** 已升级 Wrangler 4.158.0，带入 Undici 7.30.1、sharp 0.35.5；`npm ci`、`tsc`、156 条单测和本地 dev smoke 通过，隔离 audit 0。Wrangler 4.158.0 仍使用 Miniflare `5.20261104.0-beta`，litmus、长时间运行和 bundle 逐项复核尚未完成；不能把 beta 依赖的 audit 0 当作全面安全保证。生产部署身份与实际平台修补状态仍需账号内证据。
 
 ## 第一方来源与初次查询失败的历史记录
 
