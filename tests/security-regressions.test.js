@@ -435,6 +435,21 @@ test('dispatch guards both source and destination for COPY', async () => {
 	await destinationGuard.release();
 });
 
+test('dispatch maps guard capacity to service unavailable', async () => {
+	let bucket = createBucket();
+	let namespace = {
+		idFromName: () => 'guard',
+		get: () => ({ fetch: async () => new Response('capacity', { status: 503 }) }),
+	};
+	let response = await dispatchHandler(
+		new Request('http://example.com/docs/file.txt', { method: 'PUT', body: 'payload' }),
+		bucket,
+		{ sidecarPrefix: '.__sidecar__' },
+		namespace,
+	);
+	assert.equal(response.status, 503);
+});
+
 test('mutation guards are sharded by resource path', async () => {
 	let bucket = createConditionalBucket();
 	let first = await acquireResourceMutationGuard(bucket, 'docs/a.txt');

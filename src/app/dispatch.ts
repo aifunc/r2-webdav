@@ -94,6 +94,9 @@ export async function dispatchHandler(
 			}
 		}
 		let guard = await acquireResourceMutationGuards(bucket, resourcePaths, sidecarConfig, mutationGuard);
+		if (guard === 'capacity') {
+			return createTextResponse('unavailable');
+		}
 		if (guard === null) {
 			return createTextResponse('locked');
 		}

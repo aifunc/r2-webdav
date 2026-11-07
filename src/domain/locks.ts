@@ -805,6 +805,7 @@ export async function assertRecursiveDeletePermission(
 const LOCK_MUTATION_GUARD_LEASE_MS = 120_000;
 const LOCK_MUTATION_GUARD_RETRY_MS = 15;
 const LOCK_MUTATION_GUARD_ATTEMPTS = 40;
+const LOCK_MUTATION_GUARD_RENEW_MS = 30_000;
 
 type LockMutationGuardMode = 'shared' | 'exclusive';
 
@@ -830,7 +831,10 @@ interface LockMutationGuardPathRequest {
 
 export interface LockMutationGuard {
 	release(): Promise<void>;
+	isLost(): boolean;
 }
+
+export type LockMutationGuardResult = LockMutationGuard | 'capacity' | null;
 
 function emptyLockMutationGuardRecord(): LockMutationGuardRecord {
 	return { exclusive: null, shared: [] };
@@ -959,7 +963,7 @@ function buildMutationGuardPathRequests(paths: string[], includeRoot: boolean): 
 async function acquireDurableObjectMutationGuards(
 	namespace: DurableObjectNamespace,
 	paths: string[],
-): Promise<LockMutationGuard | null> {
+): Promise<LockMutationGuardResult> {
 	let requests = buildMutationGuardPathRequests(paths, true);
 	let stub = namespace.get(namespace.idFromName('global'));
 	try {
@@ -968,15 +972,63 @@ async function acquireDurableObjectMutationGuards(
 			headers: { 'Content-Type': 'application/json' },
 			body: JSON.stringify({ requests }),
 		});
-		if (response.status === 409 || !response.ok) {
+		if (response.status === 503) {
+			return 'capacity';
+		}
+		if (!response.ok) {
 			return null;
 		}
 		let body = (await response.json()) as { token?: unknown };
 		if (typeof body.token !== 'string') {
 			return null;
 		}
+		let lost = false;
+		let stopped = false;
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		let renew = async (): Promise<boolean> => {
+			for (let attempt = 0; attempt < 3; attempt += 1) {
+				try {
+					let response = await stub.fetch('https://mutation-guard/renew', {
+						method: 'POST',
+						headers: { 'Content-Type': 'application/json' },
+						body: JSON.stringify({ token: body.token }),
+					});
+					if (response.ok) {
+						return true;
+					}
+					if (response.status === 404) {
+						return false;
+					}
+				} catch {}
+				await waitForLockMutationGuard(250);
+			}
+			return false;
+		};
+		let scheduleRenewal = (): void => {
+			if (stopped) {
+				return;
+			}
+			timer = setTimeout(async () => {
+				if (stopped) {
+					return;
+				}
+				if (!(await renew())) {
+					lost = true;
+					return;
+				}
+				scheduleRenewal();
+			}, LOCK_MUTATION_GUARD_RENEW_MS);
+			(timer as { unref?: () => void }).unref?.();
+		};
+		scheduleRenewal();
+
 		return {
+			isLost: (): boolean => lost,
 			async release(): Promise<void> {
+				stopped = true;
+				if (timer !== undefined) {
+					clearTimeout(timer);
+				}
 				try {
 					await stub.fetch('https://mutation-guard/release', {
 						method: 'POST',
@@ -996,7 +1048,7 @@ async function acquireLockMutationGuards(
 	paths: string[],
 	sidecarConfig: SidecarConfig,
 	mutationGuard?: DurableObjectNamespace,
-): Promise<LockMutationGuard | null> {
+): Promise<LockMutationGuardResult> {
 	if (mutationGuard !== undefined) {
 		return acquireDurableObjectMutationGuards(mutationGuard, paths);
 	}
@@ -1042,6 +1094,7 @@ async function acquireLockMutationGuards(
 	}
 
 	return {
+		isLost: (): boolean => false,
 		async release(): Promise<void> {
 			for (let request of acquired.reverse()) {
 				await releaseLockMutationGuard(bucket, request, token);
@@ -1055,7 +1108,7 @@ export async function acquireResourceMutationGuard(
 	resourcePath: string,
 	sidecarConfig: SidecarConfig = DEFAULT_SIDECAR_CONFIG,
 	mutationGuard?: DurableObjectNamespace,
-): Promise<LockMutationGuard | null> {
+): Promise<LockMutationGuardResult> {
 	return acquireLockMutationGuards(bucket, [resourcePath], sidecarConfig, mutationGuard);
 }
 
@@ -1064,7 +1117,7 @@ export async function acquireResourceMutationGuards(
 	resourcePaths: string[],
 	sidecarConfig: SidecarConfig = DEFAULT_SIDECAR_CONFIG,
 	mutationGuard?: DurableObjectNamespace,
-): Promise<LockMutationGuard | null> {
+): Promise<LockMutationGuardResult> {
 	return acquireLockMutationGuards(bucket, [...new Set(resourcePaths)], sidecarConfig, mutationGuard);
 }
 

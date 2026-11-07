@@ -59,6 +59,10 @@ const RESPONSE_TEMPLATES = {
 		body: 'Payload Too Large',
 		status: 413,
 	},
+	unavailable: {
+		body: 'Service Unavailable',
+		status: 503,
+	},
 	unsupportedMediaType: {
 		body: 'Unsupported Media Type',
 		status: 415,

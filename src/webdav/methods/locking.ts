@@ -55,6 +55,9 @@ export async function handleLock(
 ): Promise<Response> {
 	let resourcePath = makeResourcePath(request);
 	let guard = await acquireResourceMutationGuard(bucket, resourcePath, sidecarConfig, mutationGuard);
+	if (guard === 'capacity') {
+		return createTextResponse('unavailable');
+	}
 	if (guard === null) {
 		return createTextResponse('locked');
 	}
@@ -296,6 +299,9 @@ export async function handleUnlock(
 ): Promise<Response> {
 	let resourcePath = makeResourcePath(request);
 	let guard = await acquireResourceMutationGuard(bucket, resourcePath, sidecarConfig, mutationGuard);
+	if (guard === 'capacity') {
+		return createTextResponse('unavailable');
+	}
 	if (guard === null) {
 		return createTextResponse('locked');
 	}
