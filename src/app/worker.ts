@@ -36,7 +36,7 @@ export default {
 			);
 		}
 
-		let response = await dispatchHandler(request, env.bucket, resolveSidecarConfig(env));
+		let response = await dispatchHandler(request, env.bucket, resolveSidecarConfig(env), env.MUTATION_GUARD);
 		return applyCorsHeaders(request, response);
 	},
 };

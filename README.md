@@ -36,7 +36,18 @@ bucket_name = "webdav"
 
 [vars]
 SIDECAR_PREFIX = ".__sidecar__"
+
+# 串行化 LOCK/UNLOCK 与 PUT/DELETE/COPY/MOVE 等写操作
+[[durable_objects.bindings]]
+name = "MUTATION_GUARD"
+class_name = "MutationGuardDurableObject"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["MutationGuardDurableObject"]
 ```
+
+`MutationGuardDurableObject` 是单实例的写入协调器，负责 shared/exclusive 层级守卫；已有部署升级时需要保留该 migration tag。绑定缺失时本地测试会回退到 R2 CAS 守卫，但生产环境应启用 DO。
 
 部署时推荐使用多用户密钥：
 

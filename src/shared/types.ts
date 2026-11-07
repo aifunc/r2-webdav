@@ -1,5 +1,6 @@
 export interface Env {
 	bucket: R2Bucket;
+	MUTATION_GUARD?: DurableObjectNamespace;
 	AUTH_USERS?: string;
 	USERNAME?: string;
 	PASSWORD?: string;

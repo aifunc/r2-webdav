@@ -733,6 +733,11 @@ interface LockMutationGuardRequest {
 	mode: LockMutationGuardMode;
 }
 
+interface LockMutationGuardPathRequest {
+	path: string;
+	mode: LockMutationGuardMode;
+}
+
 export interface LockMutationGuard {
 	release(): Promise<void>;
 }
@@ -845,11 +850,66 @@ async function releaseLockMutationGuard(
 	}
 }
 
+function buildMutationGuardPathRequests(paths: string[], includeRoot: boolean): LockMutationGuardPathRequest[] {
+	let modes = new Map<string, LockMutationGuardMode>();
+	for (let resourcePath of paths) {
+		for (let ancestor of getAncestorPaths(resourcePath)) {
+			if (!includeRoot && ancestor === '') {
+				continue;
+			}
+			if (ancestor !== resourcePath && !modes.has(ancestor)) {
+				modes.set(ancestor, 'shared');
+			}
+		}
+		modes.set(resourcePath, 'exclusive');
+	}
+	return [...modes].map(([path, mode]) => ({ path, mode }));
+}
+
+async function acquireDurableObjectMutationGuards(
+	namespace: DurableObjectNamespace,
+	paths: string[],
+): Promise<LockMutationGuard | null> {
+	let requests = buildMutationGuardPathRequests(paths, true);
+	let stub = namespace.get(namespace.idFromName('global'));
+	try {
+		let response = await stub.fetch('https://mutation-guard/acquire', {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ requests }),
+		});
+		if (response.status === 409 || !response.ok) {
+			return null;
+		}
+		let body = (await response.json()) as { token?: unknown };
+		if (typeof body.token !== 'string') {
+			return null;
+		}
+		return {
+			async release(): Promise<void> {
+				try {
+					await stub.fetch('https://mutation-guard/release', {
+						method: 'POST',
+						headers: { 'Content-Type': 'application/json' },
+						body: JSON.stringify({ token: body.token }),
+					});
+				} catch {}
+			},
+		};
+	} catch {
+		return null;
+	}
+}
+
 async function acquireLockMutationGuards(
 	bucket: R2Bucket,
 	paths: string[],
 	sidecarConfig: SidecarConfig,
+	mutationGuard?: DurableObjectNamespace,
 ): Promise<LockMutationGuard | null> {
+	if (mutationGuard !== undefined) {
+		return acquireDurableObjectMutationGuards(mutationGuard, paths);
+	}
 	let modes = new Map<string, LockMutationGuardMode>();
 
 	for (let resourcePath of paths) {
@@ -904,16 +964,18 @@ export async function acquireResourceMutationGuard(
 	bucket: R2Bucket,
 	resourcePath: string,
 	sidecarConfig: SidecarConfig = DEFAULT_SIDECAR_CONFIG,
+	mutationGuard?: DurableObjectNamespace,
 ): Promise<LockMutationGuard | null> {
-	return acquireLockMutationGuards(bucket, [resourcePath], sidecarConfig);
+	return acquireLockMutationGuards(bucket, [resourcePath], sidecarConfig, mutationGuard);
 }
 
 export async function acquireResourceMutationGuards(
 	bucket: R2Bucket,
 	resourcePaths: string[],
 	sidecarConfig: SidecarConfig = DEFAULT_SIDECAR_CONFIG,
+	mutationGuard?: DurableObjectNamespace,
 ): Promise<LockMutationGuard | null> {
-	return acquireLockMutationGuards(bucket, [...new Set(resourcePaths)], sidecarConfig);
+	return acquireLockMutationGuards(bucket, [...new Set(resourcePaths)], sidecarConfig, mutationGuard);
 }
 
 export async function findMatchingLock(

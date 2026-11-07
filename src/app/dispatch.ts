@@ -12,7 +12,12 @@ import {
 } from '../domain/path';
 import type { SidecarConfig } from '../shared/types';
 
-type MethodHandler = (request: Request, bucket: R2Bucket, sidecarConfig: SidecarConfig) => Promise<Response>;
+type MethodHandler = (
+	request: Request,
+	bucket: R2Bucket,
+	sidecarConfig: SidecarConfig,
+	mutationGuard?: DurableObjectNamespace,
+) => Promise<Response>;
 
 function buildDavHeaders(): HeadersInit {
 	return {
@@ -55,6 +60,7 @@ export async function dispatchHandler(
 	request: Request,
 	bucket: R2Bucket,
 	sidecarConfig: SidecarConfig = DEFAULT_SIDECAR_CONFIG,
+	mutationGuard?: DurableObjectNamespace,
 ): Promise<Response> {
 	let resourcePath: string;
 	try {
@@ -87,16 +93,16 @@ export async function dispatchHandler(
 				resourcePaths.push(destinationPath);
 			}
 		}
-		let guard = await acquireResourceMutationGuards(bucket, resourcePaths, sidecarConfig);
+		let guard = await acquireResourceMutationGuards(bucket, resourcePaths, sidecarConfig, mutationGuard);
 		if (guard === null) {
 			return createTextResponse('locked');
 		}
 		try {
-			return await handler(request, bucket, sidecarConfig);
+			return await handler(request, bucket, sidecarConfig, mutationGuard);
 		} finally {
 			await guard.release();
 		}
 	}
 
-	return handler(request, bucket, sidecarConfig);
+	return handler(request, bucket, sidecarConfig, mutationGuard);
 }

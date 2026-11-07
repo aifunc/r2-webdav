@@ -51,9 +51,10 @@ export async function handleLock(
 	request: Request,
 	bucket: R2Bucket,
 	sidecarConfig: SidecarConfig = DEFAULT_SIDECAR_CONFIG,
+	mutationGuard?: DurableObjectNamespace,
 ): Promise<Response> {
 	let resourcePath = makeResourcePath(request);
-	let guard = await acquireResourceMutationGuard(bucket, resourcePath, sidecarConfig);
+	let guard = await acquireResourceMutationGuard(bucket, resourcePath, sidecarConfig, mutationGuard);
 	if (guard === null) {
 		return createTextResponse('locked');
 	}
@@ -291,9 +292,10 @@ export async function handleUnlock(
 	request: Request,
 	bucket: R2Bucket,
 	sidecarConfig: SidecarConfig = DEFAULT_SIDECAR_CONFIG,
+	mutationGuard?: DurableObjectNamespace,
 ): Promise<Response> {
 	let resourcePath = makeResourcePath(request);
-	let guard = await acquireResourceMutationGuard(bucket, resourcePath, sidecarConfig);
+	let guard = await acquireResourceMutationGuard(bucket, resourcePath, sidecarConfig, mutationGuard);
 	if (guard === null) {
 		return createTextResponse('locked');
 	}

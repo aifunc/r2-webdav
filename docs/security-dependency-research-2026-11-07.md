@@ -2,7 +2,7 @@
 
 查询及网络恢复后补核日期：**2026-11-07，Asia/Shanghai（UTC+08:00）**。对象为当前工作区的 TypeScript / Cloudflare Worker WebDAV 项目。以第一方资料、实际锁定版本和应用调用路径为依据；补核阶段不修改应用、依赖或配置，后续修复实施阶段单独更新了 xmldom、Wrangler 和锁文件。仓库已有 `docs/superpowers/` 下的日期化设计记录；本报告放在 `docs/` 根目录。
 
-**修复实施后的变化（2026-11-07）：** 本工作树已将 `@xmldom/xmldom` 从 0.8.13 升到 **0.8.15** 并更新锁文件，未采用会破坏对象形式 `errorHandler` 的 0.9.12。只升 xmldom 时隔离 `npm audit --package-lock-only` 仍 exit 1，剩 **4 个 high 受影响包条目、26 条独立公告**（Undici 23 + sharp 3），结果保存在 `.tmp/security-audit/npm-audit-post-fix-2026-11-07.json`。随后把 `wrangler` 升到 **4.158.0**（提交 `423fac2`），锁文件带入 Miniflare `5.20261104.0-beta`、Undici **7.30.1**、sharp **0.35.5**；隔离审计变为 **exit 0、0 条**，保存在 `.tmp/security-audit/npm-audit-wrangler-upgrade-2026-11-07.json`。`npm ci`、`tsc --noEmit`、160 条单测和本地 dev `PROPFIND` 均通过。该报告其余“0.8.13/36 条/26 条”段落是升级前快照，保留用于追溯，不应作为当前工作树状态。
+**修复实施后的变化（2026-11-07）：** 本工作树已将 `@xmldom/xmldom` 从 0.8.13 升到 **0.8.15** 并更新锁文件，未采用会破坏对象形式 `errorHandler` 的 0.9.12。只升 xmldom 时隔离 `npm audit --package-lock-only` 仍 exit 1，剩 **4 个 high 受影响包条目、26 条独立公告**（Undici 23 + sharp 3），结果保存在 `.tmp/security-audit/npm-audit-post-fix-2026-11-07.json`。随后把 `wrangler` 升到 **4.158.0**（提交 `423fac2`），锁文件带入 Miniflare `5.20261104.0-beta`、Undici **7.30.1**、sharp **0.35.5**；隔离审计变为 **exit 0、0 条**，保存在 `.tmp/security-audit/npm-audit-wrangler-upgrade-2026-11-07.json`。`npm ci`、`tsc --noEmit`、163 条单测和本地 dev `PROPFIND` 均通过。该报告其余“0.8.13/36 条/26 条”段落是升级前快照，保留用于追溯，不应作为当前工作树状态。
 
 ## 结论与证据强度
 
@@ -35,7 +35,7 @@ env -u NODE_OPTIONS -u NPM_TOKEN -u NODE_AUTH_TOKEN \
 
 最新普通审计保存为 `.tmp/security-audit/npm-audit-online-2026-11-07.json`，SHA256 `4cbd8deddebfa387a98cd68ca0ab58a9fd491f639abdb6fbc16b7b20081e3fe0`；独立 lockfile 审计保存为 `.tmp/security-audit/npm-audit-online-lock-only-2026-11-07.json`，SHA256 `a51792850f1808b07eb7e09c2bc080260c155216ab88f8162df58915268d0851`。只升 xmldom 后的隔离审计为 `.tmp/security-audit/npm-audit-post-fix-2026-11-07.json`（4 包、26 条，SHA256 `90910300e845fd74366975f989d84e3561a35b9cc4fe2625bf4dbb81c9220412`）；Wrangler 4.158.0 升级后的隔离审计为 `.tmp/security-audit/npm-audit-wrangler-upgrade-2026-11-07.json`（22 行，SHA256 `4b1f5dc8672b8c30f077bec9ffba09fd8ecd0798d16dc9b4c946877aec8abdd3`，0 条）。10+23+3 是升级前独立公告数；Miniflare/Wrangler 的传导条目不重复计数。审计仅向 npm registry 发送依赖名称/版本信息，不发送项目源码或应用凭据。
 
-补核研究阶段没有运行源码回归测试：它不改变实现，目标是静态依赖/供应链研究，当时 `git diff --exit-code -- package.json package-lock.json wrangler.toml src .github scripts` 无差异。后续修复实施独立修改了源码、测试、xmldom、Wrangler 和锁文件，并运行 `npm ci`、`npm run test:unit`（160/160）、`npx tsc --noEmit`、本地 dev smoke 及修改文件的 Prettier check；这些结果见主审计报告的“修复实施状态”，不混入补核研究的静态结论。
+补核研究阶段没有运行源码回归测试：它不改变实现，目标是静态依赖/供应链研究，当时 `git diff --exit-code -- package.json package-lock.json wrangler.toml src .github scripts` 无差异。后续修复实施独立修改了源码、测试、xmldom、Wrangler 和锁文件，并运行 `npm ci`、`npm run test:unit`（163/163）、`npx tsc --noEmit`、本地 dev smoke 及修改文件的 Prettier check；这些结果见主审计报告的“修复实施状态”，不混入补核研究的静态结论。
 
 ## 实际版本与依赖链
 
@@ -190,7 +190,7 @@ env -u NODE_OPTIONS -u NPM_TOKEN -u NODE_AUTH_TOKEN \
 1. **线上优先：** 采用已核实的兼容补丁目标 **xmldom 0.8.15**，最小化更新 dependency/lockfile；序列化修复中依赖 `requireWellFormed` 的部分须显式采用该选项，不能只升级版本。验证 PROPFIND/PROPPATCH、dead property XML 往返和错误处理，并用有资源上限的专门用例验证解析复杂度；无需向生产发攻击请求。属性数、嵌套深度/命名空间声明总量限制和遇错及时终止可作为额外防线。
 2. **CI 优先：** 恢复关键脚本与 workflow 的 tracked 状态，把 Node 与 Wrangler 支持范围对齐；实际执行已有 unit/typecheck/format/litmus 门禁，避免只在本地拥有这些保护。核实 actions SHA 的上游身份并维持定期更新。
 3. **开发与安装：** 按使用场景约束开发监听地址和远程 R2 访问；避免缺包时 npx 隐式获取工具。将安装、构建、部署凭据边界分离，保留对确有需要的 hooks 的审阅记录；避免使用 `--omit=optional` 迫使平台二进制进入下载回退。
-4. **开发链更新验收（已执行）：** 已升级 Wrangler 4.158.0，带入 Undici 7.30.1、sharp 0.35.5；`npm ci`、`tsc`、160 条单测和本地 dev smoke 通过，隔离 audit 0。Wrangler 4.158.0 仍使用 Miniflare `5.20261104.0-beta`，litmus、长时间运行和 bundle 逐项复核尚未完成；不能把 beta 依赖的 audit 0 当作全面安全保证。生产部署身份与实际平台修补状态仍需账号内证据。
+4. **开发链更新验收（已执行）：** 已升级 Wrangler 4.158.0，带入 Undici 7.30.1、sharp 0.35.5；`npm ci`、`tsc`、163 条单测和本地 dev smoke 通过，隔离 audit 0。Wrangler 4.158.0 仍使用 Miniflare `5.20261104.0-beta`，litmus、长时间运行和 bundle 逐项复核尚未完成；不能把 beta 依赖的 audit 0 当作全面安全保证。生产部署身份与实际平台修补状态仍需账号内证据。
 
 ## 第一方来源与初次查询失败的历史记录
 

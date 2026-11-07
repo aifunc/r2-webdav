@@ -13,6 +13,16 @@ bucket_name = "webdav"
 [vars]
 SIDECAR_PREFIX = ".__sidecar__"
 
+# WebDAV mutation coordinator. A single Durable Object instance serializes
+# shared/exclusive guards across Workers isolates, including the root path.
+[[durable_objects.bindings]]
+name = "MUTATION_GUARD"
+class_name = "MutationGuardDurableObject"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["MutationGuardDurableObject"]
+
 # Docs: https://developers.cloudflare.com/workers/observability/logs/workers-logs/#enable-workers-logs
 [observability]
 enabled = true
