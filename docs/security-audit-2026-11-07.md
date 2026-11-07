@@ -1,6 +1,6 @@
 # r2-webdav 安全与缺陷审计：2026-11-07
 
-审计基线：`02a524e85eeb664f94801a789fd5f71ba347fb5b`，当前工作区 `main`。日期为 **2026-11-07，Asia/Shanghai**。审查了全部 `src/`、现有测试、依赖锁文件、Wrangler 配置，以及本地开发、迁移和 CI 文件。初版报告交付时业务代码未修改；随后按用户要求完成修复。A01–A11 与回归测试已提交为 `4a85eff`；Wrangler 4.158.0 依赖升级已提交为 `423fac2`；A05/A06 的按资源分片守卫扩展已提交为 `1852b1a`；A05/A06 的 Durable Object 协调器与对应测试已在当前工作树实现。未部署、未迁移。新增的回归测试与本地验证材料见下文“修复实施状态”。
+审计基线：`02a524e85eeb664f94801a789fd5f71ba347fb5b`，当前工作区 `main`。日期为 **2026-11-07，Asia/Shanghai**。审查了全部 `src/`、现有测试、依赖锁文件、Wrangler 配置，以及本地开发、迁移和 CI 文件。初版报告交付时业务代码未修改；随后按用户要求完成修复。A01–A11 与回归测试已提交为 `4a85eff`；Wrangler 4.158.0 依赖升级已提交为 `423fac2`；A05/A06 的按资源分片守卫扩展已提交为 `1852b1a`；A05/A06 的 Durable Object 协调器与 3 条 DO 测试已提交为 `06ebf61`。未部署、未迁移。新增的回归测试与本地验证材料见下文“修复实施状态”。
 
 **结论：初版审计复现了数据丢失、条件请求失效和锁一致性缺陷；线上唯一第三方 XML 依赖曾命中公开安全公告，开发工具链亦有公告命中。修复后 A01–A04、A06–A11 已在本工作树修复并有回归覆盖；A05 的并发 LOCK 与跨方法写操作由单实例 Durable Object 的 shared/exclusive 层级守卫串行化，根路径 LOCK 也会阻止子资源写入，目录 sidecar 与文件锁不再出现并发双成功；A12 已通过 Wrangler 4.158.0 升级消除 npm 命中，但 Miniflare 5 beta 仍是兼容性风险。未发现明确的源码后门迹象。Durable Object 是应用层协调，不是 R2 存储级事务。**
 
@@ -124,7 +124,7 @@
 
 **建议：** 缺失记录使用条件创建，存在记录使用能代表锁状态变化的版本做条件更新。将文件锁状态放入具有独立版本的记录，或通过 Durable Object 等方式串行化同一资源/层级的锁状态；不要把文件内容 ETag 当作锁元数据版本。应同时验证并发 LOCK、UNLOCK、PUT 与 PROPPATCH。
 
-**修复状态：** 目录 sidecar 首次写已改为 `onlyIf: { etagDoesNotMatch: '*' }`。并发锁与跨方法写操作改由 `src/domain/mutation-guard.ts` 的 `MutationGuardDurableObject` 协调：所有 Worker 实例通过 `idFromName('global')` 访问同一 DO，`acquire` 在 `blockConcurrencyWhile` 中清理过期项并原子检查 shared/exclusive 冲突，`release` 按 token 删除；目标路径取 exclusive，祖先（含根路径）取 shared，因此根路径 LOCK 会阻止子资源 PUT/DELETE，同资源/父子资源冲突返回 423，不同资源可并行。LOCK/UNLOCK 与 dispatch 中的 PUT/DELETE/MKCOL/PROPPATCH/COPY/MOVE 共用该守卫；绑定缺失时回退到原 R2 CAS 守卫。DO 使用 SQLite-backed 迁移 `v1`，租约 120 秒；本地 dev 已验证根 LOCK 201 → 子资源 PUT 423 → UNLOCK 204 → PUT 204，DO 测试和全量单测 `163/163` 通过。残余是租约过期后旧持有者、绕开 dispatch 直接调用 handler、DO 故障时写请求 fail-closed，以及 R2 带外写入；DO 串行化不是存储级事务。
+**修复状态：** 目录 sidecar 首次写已改为 `onlyIf: { etagDoesNotMatch: '*' }`。并发锁与跨方法写操作改由 `src/domain/mutation-guard.ts` 的 `MutationGuardDurableObject` 协调：所有 Worker 实例通过 `idFromName('global')` 访问同一 DO，`acquire` 在 `blockConcurrencyWhile` 中清理过期项并原子检查 shared/exclusive 冲突，`release` 按 token 删除；目标路径取 exclusive，祖先（含根路径）取 shared，因此根路径 LOCK 会阻止子资源 PUT/DELETE，同资源/父子资源冲突返回 423，不同资源可并行。LOCK/UNLOCK 与 dispatch 中的 PUT/DELETE/MKCOL/PROPPATCH/COPY/MOVE 共用该守卫；绑定缺失时回退到原 R2 CAS 守卫。DO 使用 SQLite-backed 迁移 `v1`（提交 `06ebf61`），租约 120 秒；本地 dev 已验证根 LOCK 201 → 子资源 PUT 423 → UNLOCK 204 → PUT 204，DO 测试和全量单测 `163/163` 通过。残余是租约过期后旧持有者、绕开 dispatch 直接调用 handler、DO 故障时写请求 fail-closed，以及 R2 带外写入；DO 串行化不是存储级事务。
 
 ## A06：失效的版本条件未阻止修改
 
@@ -198,22 +198,22 @@
 
 ## 验证结果与复现材料
 
-| 验证                                                  | 结果                                                                                                                                                                     |
-| ----------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `npm run test:unit`                                   | 修复前 **142/142 通过**；修复后 **163/163 通过**（新增 21 条安全回归）                                                                                                   |
-| `npx tsc --noEmit`                                    | 通过                                                                                                                                                                     |
-| `npm run check`（全量）                               | 修复前 Prettier 因原有未跟踪 `.agents/`、`.forge/` 和 `skills-lock.json` 共 23 个文件失败；本次对修改文件单独 check 通过                                                 |
-| 对 Git 已跟踪的 TS/JS/JSON/Markdown 做 Prettier check | **通过**，用于定位全量格式失败的来源                                                                                                                                     |
-| 只读 `npm audit`（网络恢复后两次）                    | exit 1；**5 个 high 包条目、36 条独立公告**，是漏洞结果，不是执行错误                                                                                                    |
-| 修复后隔离 `npm audit`（升级 Wrangler 前）            | exit 1；xmldom 已消失，仍为 **4 个 high 包条目、26 条开发链公告**                                                                                                        |
-| 升级 Wrangler 4.158.0 后隔离 `npm audit`              | **exit 0；0 条公告**；Miniflare 5 beta 仍需兼容性验证                                                                                                                    |
-| `npm ci` 干净安装 + unit/typecheck + dev smoke        | 通过；163/163、tsc 通过、`PROPFIND / Depth:0` 返回 207                                                                                                                   |
-| `main-repro.mjs`                                      | 通过；鉴权入口下条件请求、内容响应、文件锁及路径别名重现                                                                                                                 |
-| `reviewer-repro.mjs` / `post-fix-repro.mjs`           | 初版通过并重现错误；修复后版本验证 Depth、子树锁、If、LOCK、PROPPATCH 等新行为                                                                                           |
-| `xml-complexity-repro.mjs`                            | 通过；128 MiB 堆上限下受控性能测量                                                                                                                                       |
-| `local-r2-repro.mjs`                                  | 最终通过；本地 R2 确认内容 ETag、过期删除、无效 COPY、文件排他锁竞争和路径别名                                                                                           |
-| 业务代码、依赖、配置、已有测试 Git diff               | A01–A11、xmldom 0.8.15、CI/忽略规则、163 条测试已提交 `4a85eff`；Wrangler 4.158.0 升级已提交 `423fac2`；DO 协调器与 3 条 DO 测试为当前未提交工作树改动（提交后更新报告） |
-| 生产/远程 R2、部署、正式迁移、litmus                  | 未运行；没有访问生产凭据或数据                                                                                                                                           |
+| 验证                                                  | 结果                                                                                                                                             |
+| ----------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `npm run test:unit`                                   | 修复前 **142/142 通过**；修复后 **163/163 通过**（新增 21 条安全回归）                                                                           |
+| `npx tsc --noEmit`                                    | 通过                                                                                                                                             |
+| `npm run check`（全量）                               | 修复前 Prettier 因原有未跟踪 `.agents/`、`.forge/` 和 `skills-lock.json` 共 23 个文件失败；本次对修改文件单独 check 通过                         |
+| 对 Git 已跟踪的 TS/JS/JSON/Markdown 做 Prettier check | **通过**，用于定位全量格式失败的来源                                                                                                             |
+| 只读 `npm audit`（网络恢复后两次）                    | exit 1；**5 个 high 包条目、36 条独立公告**，是漏洞结果，不是执行错误                                                                            |
+| 修复后隔离 `npm audit`（升级 Wrangler 前）            | exit 1；xmldom 已消失，仍为 **4 个 high 包条目、26 条开发链公告**                                                                                |
+| 升级 Wrangler 4.158.0 后隔离 `npm audit`              | **exit 0；0 条公告**；Miniflare 5 beta 仍需兼容性验证                                                                                            |
+| `npm ci` 干净安装 + unit/typecheck + dev smoke        | 通过；163/163、tsc 通过、`PROPFIND / Depth:0` 返回 207                                                                                           |
+| `main-repro.mjs`                                      | 通过；鉴权入口下条件请求、内容响应、文件锁及路径别名重现                                                                                         |
+| `reviewer-repro.mjs` / `post-fix-repro.mjs`           | 初版通过并重现错误；修复后版本验证 Depth、子树锁、If、LOCK、PROPPATCH 等新行为                                                                   |
+| `xml-complexity-repro.mjs`                            | 通过；128 MiB 堆上限下受控性能测量                                                                                                               |
+| `local-r2-repro.mjs`                                  | 最终通过；本地 R2 确认内容 ETag、过期删除、无效 COPY、文件排他锁竞争和路径别名                                                                   |
+| 业务代码、依赖、配置、已有测试 Git diff               | A01–A11、xmldom 0.8.15、CI/忽略规则、163 条测试已提交 `4a85eff`；Wrangler 4.158.0 升级已提交 `423fac2`；DO 协调器与 3 条 DO 测试已提交 `06ebf61` |
+| 生产/远程 R2、部署、正式迁移、litmus                  | 未运行；没有访问生产凭据或数据                                                                                                                   |
 
 复现文件在 `.tmp/security-audit/`，不进入版本控制。先从项目根目录运行 `npm run test:unit` 生成 `.tmp/test-build`，再运行：
 
