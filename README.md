@@ -113,3 +113,7 @@ litmus -k http://127.0.0.1:8787/ <user> <pass>
 ```
 
 当前单测主要覆盖鉴权、目录 sidecar、存储行为和 COPY/MOVE 安全逻辑。GitHub Actions 还会跑 `basic`、`copymove`、`props`、`locks` 四组 litmus 测试；`http` 套件仍因本地 Workers 的 `Expect: 100-continue` 限制被排除。
+
+## 许可证
+
+[Apache-2.0](LICENSE)。本项目基于 [abersheeran/r2-webdav](https://github.com/abersheeran/r2-webdav) 修改，原始版权与许可证声明保留在 `LICENSE` 中。

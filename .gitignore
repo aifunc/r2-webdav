@@ -177,9 +177,6 @@ debug.log
 child.log
 
 docs/superpowers/
-.editorconfig
-.prettierignore
-.prettierrc
 
 # gstack 本地安全报告/状态
 .gstack/
