@@ -206,7 +206,11 @@ export async function updateDirectorySidecar(
 		let stored = await bucket.put(
 			sidecarKey,
 			serializeDirectorySidecar(updated),
-			state.etag === undefined ? {} : { onlyIf: { etagMatches: state.etag } },
+			state.exists && state.etag !== undefined
+				? { onlyIf: { etagMatches: state.etag } }
+				: // R2 的 put 条件失败返回 null；用 etagDoesNotMatch:'*' 把首次创建变成
+					// create-if-absent，避免两个并发首次 LOCK/属性写都成功、后写覆盖先写。
+					{ onlyIf: { etagDoesNotMatch: '*' } },
 		);
 		if (stored !== null) {
 			return null;

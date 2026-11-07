@@ -1,5 +1,6 @@
 import {
 	assertLockPermission,
+	assertRecursiveDeletePermission,
 	getPreservedCustomMetadata,
 	rewriteLockRoots,
 	stripLockMetadata,
@@ -18,6 +19,8 @@ import {
 	ensureDestinationParentExists,
 	loadTransferResource,
 	moveDestinationValidation,
+	normalizeDepthHeader,
+	parseOverwriteHeader,
 	resolveDepthTransfer,
 	resolveDestinationTarget,
 	transferCollectionOrNotFound,
@@ -31,7 +34,11 @@ export async function handleCopy(
 	sidecarConfig: SidecarConfig = DEFAULT_SIDECAR_CONFIG,
 ): Promise<Response> {
 	let resourcePath = makeResourcePath(request);
-	let overwriteDisabled = request.headers.get('Overwrite') === 'F';
+	let overwrite = parseOverwriteHeader(request.headers.get('Overwrite'));
+	if (overwrite === null) {
+		return createTextResponse('badRequest');
+	}
+	let overwriteDisabled = !overwrite;
 	let destinationTarget = resolveDestinationTarget(request, resourcePath, sidecarConfig);
 	if (destinationTarget instanceof Response) {
 		return destinationTarget;
@@ -46,6 +53,17 @@ export async function handleCopy(
 	let resource = await loadTransferResource(bucket, resourcePath, destination, sidecarConfig);
 	if (resource instanceof Response) {
 		return resource;
+	}
+
+	// 在任何破坏性操作（尤其是覆盖目标前的 DELETE）之前拒绝无效 Depth。
+	// RFC 4918 的 ABNF 字面量按 RFC 5234 大小写不敏感，Infinity 与 infinity 等价。
+	let collectionDepth = 'infinity';
+	if (resource.isCollection) {
+		let normalizedDepth = normalizeDepthHeader(request.headers.get('Depth') ?? 'infinity');
+		if (normalizedDepth === null || (normalizedDepth !== '0' && normalizedDepth !== 'infinity')) {
+			return createTextResponse('badRequest');
+		}
+		collectionDepth = normalizedDepth;
 	}
 
 	let parentResponse = await ensureDestinationParentExists(bucket, destination, sidecarConfig);
@@ -92,7 +110,7 @@ export async function handleCopy(
 	}
 
 	if (resource.isCollection) {
-		return resolveDepthTransfer(request.headers.get('Depth') ?? 'infinity', {
+		return resolveDepthTransfer(collectionDepth, {
 			infinity: async () => {
 				let transferResponse = await transferCollectionOrNotFound(
 					bucket,
@@ -144,14 +162,18 @@ export async function handleMove(
 	sidecarConfig: SidecarConfig = DEFAULT_SIDECAR_CONFIG,
 ): Promise<Response> {
 	let resourcePath = makeResourcePath(request);
-	let overwrite = (request.headers.get('Overwrite') ?? 'T') !== 'F';
+	let overwrite = parseOverwriteHeader(request.headers.get('Overwrite'));
+	if (overwrite === null) {
+		return createTextResponse('badRequest');
+	}
 	let destinationTarget = resolveDestinationTarget(request, resourcePath, sidecarConfig);
 	if (destinationTarget instanceof Response) {
 		return destinationTarget;
 	}
 	let destination = destinationTarget.path;
 
-	let sourceLockResponse = await assertLockPermission(request, bucket, resourcePath, sidecarConfig);
+	// MOVE 会删除源资源，源集合的每个后代也必须通过锁检查（RFC 4918 §9.9.2）。
+	let sourceLockResponse = await assertRecursiveDeletePermission(request, bucket, resourcePath, sidecarConfig);
 	if (sourceLockResponse !== null) {
 		return sourceLockResponse;
 	}
@@ -169,6 +191,15 @@ export async function handleMove(
 	);
 	if (resource instanceof Response) {
 		return resource;
+	}
+
+	let collectionDepth = 'infinity';
+	if (resource.isCollection) {
+		let normalizedDepth = normalizeDepthHeader(request.headers.get('Depth') ?? 'infinity');
+		if (normalizedDepth === null || (normalizedDepth !== '0' && normalizedDepth !== 'infinity')) {
+			return createTextResponse('badRequest');
+		}
+		collectionDepth = normalizedDepth;
 	}
 
 	let parentResponse = await ensureDestinationParentExists(bucket, destination, sidecarConfig);
@@ -234,7 +265,7 @@ export async function handleMove(
 			);
 			return completeTransfer(transferResponse, destinationExists, destination, true);
 		};
-		return resolveDepthTransfer(request.headers.get('Depth') ?? 'infinity', {
+		return resolveDepthTransfer(collectionDepth, {
 			infinity: transferInfinity,
 			'0': transferInfinity,
 		});

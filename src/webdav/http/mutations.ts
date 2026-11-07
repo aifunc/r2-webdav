@@ -12,6 +12,7 @@ import { DEFAULT_SIDECAR_CONFIG } from '../../shared/sidecar';
 import type { SidecarConfig } from '../../shared/types';
 import { createdResponse } from '../responses';
 import {
+	assertIfMatch,
 	assertUnmodifiedSince,
 	buildResourceVersionHeaders,
 	noContentResponse,
@@ -106,7 +107,11 @@ export async function handleDelete(
 	if (resolved === null) {
 		return createTextResponse('notFound');
 	}
-	let preconditionResponse = assertUnmodifiedSince(request, resolved.object);
+	let preconditionResponse = assertIfMatch(request, resolved.object);
+	if (preconditionResponse !== null) {
+		return preconditionResponse;
+	}
+	preconditionResponse = assertUnmodifiedSince(request, resolved.object);
 	if (preconditionResponse !== null) {
 		return preconditionResponse;
 	}

@@ -1,8 +1,9 @@
-import { DEAD_PROPERTY_PREFIX, VALID_LOCK_DEPTHS } from '../../shared/constants';
+import { DEAD_PROPERTY_PREFIX } from '../../shared/constants';
 import {
+	acquireLockMutationGuard,
 	assertLockPermission,
+	assertNoDescendantLockConflicts,
 	determineLockDepth,
-	extractLockOwner,
 	findMatchingLock,
 	getLockDetails,
 	getLockDiscovery,
@@ -33,7 +34,8 @@ import {
 	readLegacyDirectoryMarker,
 	updateDirectorySidecar,
 } from '../../domain/directories';
-import { createTextResponse, readXmlBodyWithLimit, xmlResponse } from '../responses';
+import { createTextResponse, normalizeDepthHeader, readXmlBodyWithLimit, xmlResponse } from '../responses';
+import { parseLockRequest } from '../xml';
 
 function stripDirectoryMetadata(customMetadata: Record<string, string> | undefined): Record<string, string> {
 	let metadata = stripLockMetadata(customMetadata);
@@ -50,9 +52,25 @@ export async function handleLock(
 	bucket: R2Bucket,
 	sidecarConfig: SidecarConfig = DEFAULT_SIDECAR_CONFIG,
 ): Promise<Response> {
+	let guard = await acquireLockMutationGuard(bucket, sidecarConfig);
+	if (guard === null) {
+		return createTextResponse('locked');
+	}
+	try {
+		return await acquireLock(request, bucket, sidecarConfig);
+	} finally {
+		await guard.release();
+	}
+}
+
+async function acquireLock(request: Request, bucket: R2Bucket, sidecarConfig: SidecarConfig): Promise<Response> {
 	let resourcePath = makeResourcePath(request);
-	let depthHeader = request.headers.get('Depth');
-	if (depthHeader !== null && !VALID_LOCK_DEPTHS.includes(depthHeader as (typeof VALID_LOCK_DEPTHS)[number])) {
+	let rawDepthHeader = request.headers.get('Depth');
+	let depthHeader = rawDepthHeader === null ? null : normalizeDepthHeader(rawDepthHeader);
+	if (depthHeader !== null && depthHeader !== '0' && depthHeader !== 'infinity') {
+		return createTextResponse('badRequest');
+	}
+	if (rawDepthHeader !== null && depthHeader === null) {
 		return createTextResponse('badRequest');
 	}
 
@@ -62,12 +80,12 @@ export async function handleLock(
 		return createTextResponse('payloadTooLarge');
 	}
 	let isRefreshRequest = body === '';
-	let requestedScope: LockDetails['scope'] = /<shared\b/i.test(body) ? 'shared' : 'exclusive';
-	if (body !== '' && !/<write\b/i.test(body)) {
+	let parsedLockRequest = isRefreshRequest ? null : parseLockRequest(body);
+	if (!isRefreshRequest && parsedLockRequest === null) {
 		return createTextResponse('badRequest');
 	}
-
-	let owner = extractLockOwner(body);
+	let requestedScope: LockDetails['scope'] = parsedLockRequest?.scope ?? 'exclusive';
+	let owner = parsedLockRequest?.owner;
 	let lockResponse = await assertLockPermission(request, bucket, resourcePath, sidecarConfig, {
 		ignoreSharedLocksOnTarget: body !== '' && requestedScope === 'shared',
 	});
@@ -163,7 +181,21 @@ export async function handleLock(
 		depth = existingLock.depth;
 	} else {
 		let resourceType = resource?.customMetadata?.resourcetype ?? (isDirectoryTarget ? '<collection />' : undefined);
-		depth = determineLockDepth(resourceType, depthHeader as LockDetails['depth'] | null);
+		depth = determineLockDepth(resourceType, depthHeader);
+	}
+
+	if (existingLock === undefined && depth === 'infinity') {
+		// RFC 4918 §9.10.3：深度无限的新锁覆盖全部成员；任一后代已有锁时必须整体失败，
+		// 不能只检查目标资源自身的 currentLocks。
+		let descendantLockResponse = await assertNoDescendantLockConflicts(
+			bucket,
+			resourcePath,
+			sidecarConfig,
+			requestedScope,
+		);
+		if (descendantLockResponse !== null) {
+			return descendantLockResponse;
+		}
 	}
 
 	let lockDetails: LockDetails = {
@@ -259,6 +291,18 @@ export async function handleUnlock(
 	bucket: R2Bucket,
 	sidecarConfig: SidecarConfig = DEFAULT_SIDECAR_CONFIG,
 ): Promise<Response> {
+	let guard = await acquireLockMutationGuard(bucket, sidecarConfig);
+	if (guard === null) {
+		return createTextResponse('locked');
+	}
+	try {
+		return await unlockResource(request, bucket, sidecarConfig);
+	} finally {
+		await guard.release();
+	}
+}
+
+async function unlockResource(request: Request, bucket: R2Bucket, sidecarConfig: SidecarConfig): Promise<Response> {
 	let resourcePath = makeResourcePath(request);
 	let lockState = await readLockState(bucket, resourcePath, sidecarConfig);
 	let resource = lockState.resource;

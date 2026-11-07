@@ -194,7 +194,7 @@ function hasLocalName(element: Element, name: string): boolean {
 }
 
 function isDocumentElementNamed(document: Document, name: string): boolean {
-	return hasLocalName(document.documentElement, name);
+	return document.documentElement !== null && hasLocalName(document.documentElement, name);
 }
 
 function findChildElement(element: Element, name: string): Element | undefined {
@@ -218,6 +218,43 @@ function getPropfindPropertiesRequest(propElement: Element): PropfindRequest | n
 	return {
 		mode: 'prop',
 		properties,
+	};
+}
+
+function isDavElement(element: Element, name: string): boolean {
+	return element.namespaceURI === DAV_NAMESPACE && hasLocalName(element, name);
+}
+
+export type ParsedLockRequest = {
+	scope: LockDetails['scope'];
+	owner: string | undefined;
+};
+
+export function parseLockRequest(body: string): ParsedLockRequest | null {
+	let document = parseXmlDocument(body);
+	if (document === null || document.documentElement === null || !isDavElement(document.documentElement, 'lockinfo')) {
+		return null;
+	}
+
+	let root = document.documentElement;
+	let lockscope = getChildElements(root).find((child) => isDavElement(child, 'lockscope'));
+	let locktype = getChildElements(root).find((child) => isDavElement(child, 'locktype'));
+	if (lockscope === undefined || locktype === undefined) {
+		return null;
+	}
+	let scopeElement = getChildElements(lockscope).find(
+		(child) => isDavElement(child, 'shared') || isDavElement(child, 'exclusive'),
+	);
+	let writeElement = getChildElements(locktype).find((child) => isDavElement(child, 'write'));
+	if (scopeElement === undefined || writeElement === undefined) {
+		return null;
+	}
+
+	let ownerElement = getChildElements(root).find((child) => isDavElement(child, 'owner'));
+	let owner = ownerElement === undefined ? undefined : serializeNodeChildren(ownerElement).trim();
+	return {
+		scope: hasLocalName(scopeElement, 'shared') ? 'shared' : 'exclusive',
+		owner: owner === '' ? undefined : owner,
 	};
 }
 

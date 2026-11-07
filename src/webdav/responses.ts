@@ -157,8 +157,31 @@ export function transferCompletedResponse(
 	return createdResponse(destination, isCollection, '', headers);
 }
 
+export type NormalizedDepth = '0' | '1' | 'infinity';
+
+export function normalizeDepthHeader(depth: string): NormalizedDepth | null {
+	let normalized = depth.trim().toLowerCase();
+	return normalized === '0' || normalized === '1' || normalized === 'infinity' ? normalized : null;
+}
+
+// RFC 4918 的 ABNF 字符串字面量按 RFC 5234 大小写不敏感，Overwrite 只接受 T/F。
+export function parseOverwriteHeader(value: string | null): boolean | null {
+	if (value === null) {
+		return true;
+	}
+	let normalized = value.trim().toLowerCase();
+	if (normalized === 't') {
+		return true;
+	}
+	if (normalized === 'f') {
+		return false;
+	}
+	return null;
+}
+
 export function resolveDepthHandler<T>(depth: string, handlers: Record<string, T>): T | null {
-	return handlers[depth] ?? null;
+	let normalized = normalizeDepthHeader(depth);
+	return normalized === null ? null : (handlers[normalized] ?? null);
 }
 
 export function resolveDestinationTarget(

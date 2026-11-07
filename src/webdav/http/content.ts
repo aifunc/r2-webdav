@@ -26,10 +26,31 @@ const OBJECT_RESPONSE_METADATA_HEADERS = [
 
 const INLINE_SAFE_CONTENT_TYPES = new Set(['text/plain', 'text/csv', 'application/pdf', 'application/json']);
 const INLINE_SAFE_CONTENT_TYPE_PREFIXES = ['image/', 'audio/', 'video/'];
+const ACTIVE_CONTENT_TYPES = new Set([
+	'text/html',
+	'application/xhtml+xml',
+	'image/svg+xml',
+	'application/xml',
+	'text/xml',
+	'application/javascript',
+	'text/javascript',
+	'application/x-javascript',
+	'application/rss+xml',
+	'application/atom+xml',
+]);
+
+function getBaseContentType(contentType: string | undefined): string | undefined {
+	return contentType?.split(';')[0]?.trim().toLowerCase();
+}
+
+function isActiveContentType(contentType: string | undefined): boolean {
+	let base = getBaseContentType(contentType);
+	return base !== undefined && (ACTIVE_CONTENT_TYPES.has(base) || base.endsWith('+xml'));
+}
 
 function isInlineSafeContentType(contentType: string | undefined): boolean {
-	let base = contentType?.split(';')[0]?.trim().toLowerCase();
-	if (base === undefined) {
+	let base = getBaseContentType(contentType);
+	if (base === undefined || isActiveContentType(base)) {
 		return false;
 	}
 	if (INLINE_SAFE_CONTENT_TYPE_PREFIXES.some((prefix) => base.startsWith(prefix))) {
@@ -62,7 +83,14 @@ function buildObjectResponseHeaders(object: R2ObjectBody, rangeOffset: number, r
 		}
 	}
 
-	if (
+	headers.set('X-Content-Type-Options', 'nosniff');
+
+	if (isActiveContentType(object.httpMetadata?.contentType)) {
+		// 上传的 SVG/HTML/XML 可能携带脚本。即使客户端上传了 inline disposition，
+		// 也必须强制下载，并附加 sandbox CSP 作为第二道防线。
+		headers.set('Content-Disposition', 'attachment');
+		headers.set('Content-Security-Policy', "sandbox; default-src 'none'; frame-ancestors 'none'");
+	} else if (
 		object.httpMetadata?.contentDisposition === undefined &&
 		!isInlineSafeContentType(object.httpMetadata?.contentType)
 	) {

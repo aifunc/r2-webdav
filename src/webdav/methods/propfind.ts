@@ -15,7 +15,7 @@ import {
 	renderPropertyElement,
 	renderPropstat,
 } from '../xml';
-import { createTextResponse, readXmlBodyWithLimit, xmlResponse } from '../responses';
+import { createTextResponse, normalizeDepthHeader, readXmlBodyWithLimit, xmlResponse } from '../responses';
 import { renderEmptyRequestedProperty } from './property-shared';
 
 type PropfindProperties = {
@@ -129,7 +129,7 @@ async function resolvePropfindDepthResponses(
 		'1': async () => listPropfindResponses(bucket, resourcePath, propfindRequest, false, sidecarConfig, maxEntries),
 		infinity: async () => listPropfindResponses(bucket, resourcePath, propfindRequest, true, sidecarConfig, maxEntries),
 	};
-	let depthHandler = depthHandlers[depth];
+	let depthHandler = depthHandlers[normalizeDepthHeader(depth) ?? ''];
 	if (depthHandler === undefined) {
 		return null;
 	}

@@ -14,7 +14,7 @@ import type { DeadProperty, DirectorySidecar, SidecarConfig } from '../../shared
 import { getDeadPropertyKey, parseProppatchRequest } from '../xml';
 import { createTextResponse, readXmlBodyWithLimit, xmlResponse } from '../responses';
 import { appendPropstatProperties, isProtectedProperty, renderProppatchResponse } from './property-shared';
-import { assertUnmodifiedSince, buildResourceVersionHeaders } from '../http/shared';
+import { assertIfMatch, assertUnmodifiedSince, buildResourceVersionHeaders } from '../http/shared';
 
 function stripDirectoryMetadata(customMetadata: Record<string, string> | undefined): Record<string, string> {
 	let metadata = stripLockMetadata(customMetadata);
@@ -41,7 +41,11 @@ export async function handleProppatch(
 		bucket.head(resourcePath),
 		readDirectorySidecarState(bucket, getDirectorySidecarKey(resourcePath, sidecarConfig)),
 	]);
-	let preconditionResponse = assertUnmodifiedSince(request, object);
+	let preconditionResponse = assertIfMatch(request, object);
+	if (preconditionResponse !== null) {
+		return preconditionResponse;
+	}
+	preconditionResponse = assertUnmodifiedSince(request, object);
 	if (preconditionResponse !== null) {
 		return preconditionResponse;
 	}
@@ -122,11 +126,18 @@ export async function handleProppatch(
 				getDirectorySidecarKey(resourcePath, sidecarConfig),
 				(currentSidecar) => {
 					let nextProps: Record<string, DeadProperty> = { ...(currentSidecar?.props ?? baseProps ?? {}) };
-					for (const property of successfulSetProperties) {
-						nextProps[getDeadPropertyKey(property.namespaceURI, property.localName)] = property;
-					}
-					for (const property of successfulRemoveProperties) {
-						delete nextProps[getDeadPropertyKey(property.namespaceURI, property.localName)];
+					// RFC 4918 §9.2：PROPPATCH 的 set/remove 必须按文档顺序应用；
+					// 同一属性先 set 后 remove 时，最终状态必须是 remove。
+					for (const operation of parsedRequest.operations) {
+						if (isProtectedProperty(operation.property)) {
+							continue;
+						}
+						let propertyKey = getDeadPropertyKey(operation.property.namespaceURI, operation.property.localName);
+						if (operation.action === 'set') {
+							nextProps[propertyKey] = operation.property;
+						} else {
+							delete nextProps[propertyKey];
+						}
 					}
 					let nextSidecar: DirectorySidecar = {
 						kind: 'directory',

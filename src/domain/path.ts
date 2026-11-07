@@ -26,6 +26,8 @@ export function getResourceHref(key: string, isCollection: boolean): string {
 	return encodeHrefPath(`/${key + (isCollection ? '/' : '')}`);
 }
 
+export class InvalidResourcePathError extends Error {}
+
 export function decodeResourcePath(pathname: string): string {
 	// WHATWG URL 会规范化 `..` 但不折叠连续斜杠；统一折叠，
 	// 避免 `//foo` 产生带前导斜杠的 resourcePath（与 sidecar key 口径不一致）。
@@ -36,11 +38,18 @@ export function decodeResourcePath(pathname: string): string {
 	return trimTrailingSlash(normalized.slice(1))
 		.split('/')
 		.map((segment) => {
+			let decoded: string;
 			try {
-				return decodeURIComponent(segment);
+				decoded = decodeURIComponent(segment);
 			} catch {
-				return segment;
+				decoded = segment;
 			}
+			// 解码后重新引入分隔符会绕过分段检查，并与字面路径指向同一存储/元数据：
+			// 例如 `/%2Fdocs` 与 `/docs` 都归一为 `docs`。拒绝而不是静默合并。
+			if (decoded.includes('/') || decoded.includes('\\') || decoded.includes('\0')) {
+				throw new InvalidResourcePathError('resource path segment contains a separator');
+			}
+			return decoded;
 		})
 		.join('/');
 }

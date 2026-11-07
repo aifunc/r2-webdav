@@ -463,6 +463,35 @@ function matchEtagConditions(conditions: IfHeaderStateCondition[], resource: R2O
 		);
 }
 
+async function evaluateIfHeaderConditions(request: Request, bucket: R2Bucket): Promise<boolean | null> {
+	let ifHeader = request.headers.get('If');
+	if (ifHeader === null || ifHeader.trim() === '') {
+		return null;
+	}
+
+	let conditionLists = parseIfHeader(ifHeader, request.url);
+	if (conditionLists === null || conditionLists.length === 0) {
+		return false;
+	}
+
+	let requestPath: string;
+	try {
+		requestPath = decodeResourcePath(new URL(request.url).pathname);
+	} catch {
+		return false;
+	}
+	let requestResource = await bucket.head(requestPath);
+	// RFC 4918 §10.4.2：只要有一个条件列表为真即可；没有标签的列表作用于 Request-URI，
+	// 带标签的列表作用于标签资源。token 条件此处先视为可满足，随后逐资源校验 token。
+	for (const { conditions, tagPath } of conditionLists) {
+		let resource = tagPath === null || tagPath === requestPath ? requestResource : await bucket.head(tagPath);
+		if (matchEtagConditions(conditions, resource)) {
+			return true;
+		}
+	}
+	return false;
+}
+
 function collectPositiveLockTokens(conditions: IfHeaderStateCondition[]): string[] {
 	return conditions.flatMap((condition) => {
 		if (condition.kind !== 'token' || condition.negated) {
@@ -533,6 +562,10 @@ export async function assertLockPermission(
 	options: { ignoreSharedLocksOnTarget?: boolean } = {},
 ): Promise<Response | null> {
 	let requestResource = resourcePath === '' ? null : await bucket.head(resourcePath);
+	let ifHeaderResult = await evaluateIfHeaderConditions(request, bucket);
+	if (ifHeaderResult === false) {
+		return createLockFailureResponse('preconditionFailed');
+	}
 	let existingLockTokens = new Set<string>();
 	for (const candidate of getAncestorPaths(resourcePath)) {
 		let [resource, sidecarResult] = await Promise.all([
@@ -572,6 +605,45 @@ export async function assertLockPermission(
 			if (!existingLockTokens.has(token)) {
 				return createLockFailureResponse('preconditionFailed');
 			}
+		}
+	}
+
+	return null;
+}
+
+export async function assertNoDescendantLockConflicts(
+	bucket: R2Bucket,
+	resourcePath: string,
+	sidecarConfig: SidecarConfig = DEFAULT_SIDECAR_CONFIG,
+	requestedScope: LockDetails['scope'] = 'exclusive',
+): Promise<Response | null> {
+	let prefix = getCollectionPrefix(resourcePath);
+	for await (let descendant of listAll(bucket, prefix, true)) {
+		if (descendant.key === resourcePath) {
+			continue;
+		}
+		let lockDetails = getLockDetails(descendant.customMetadata);
+		if (lockDetails.length === 0 && descendant.customMetadata?.resourcetype === '<collection />') {
+			let sidecar = (await readDirectorySidecarState(bucket, getDirectorySidecarKey(descendant.key, sidecarConfig)))
+				.sidecar;
+			lockDetails = sidecar?.locks ?? [];
+		}
+		if (lockDetails.some((lock) => requestedScope === 'exclusive' || lock.scope === 'exclusive')) {
+			return createLockFailureResponse('locked');
+		}
+	}
+
+	let sidecarPrefix = `${getSidecarPrefix(sidecarConfig)}/${resourcePath === '' ? '' : `${resourcePath}/`}`;
+	for await (let object of listAll(bucket, sidecarPrefix, true)) {
+		if (!isDirectorySidecarKey(object.key, sidecarConfig)) {
+			continue;
+		}
+		if (getResourcePathFromSidecarKey(object.key, sidecarConfig) === resourcePath) {
+			continue;
+		}
+		let sidecar = (await readDirectorySidecarState(bucket, object.key)).sidecar;
+		if ((sidecar?.locks ?? []).some((lock) => requestedScope === 'exclusive' || lock.scope === 'exclusive')) {
+			return createLockFailureResponse('locked');
 		}
 	}
 
@@ -635,6 +707,74 @@ export async function assertRecursiveDeletePermission(
 		if (!hasMatchingLockToken(lockDetails, requestLockTokens.tokens)) {
 			return createLockFailureResponse('locked');
 		}
+	}
+
+	return null;
+}
+
+const LOCK_MUTATION_GUARD_LEASE_MS = 30_000;
+const LOCK_MUTATION_GUARD_RETRY_MS = 15;
+const LOCK_MUTATION_GUARD_ATTEMPTS = 40;
+
+export interface LockMutationGuard {
+	release(): Promise<void>;
+}
+
+function getLockMutationGuardKey(sidecarConfig: SidecarConfig): string {
+	return `${getSidecarPrefix(sidecarConfig)}/.lock-mutation-guard`;
+}
+
+function waitForLockMutationGuard(ms: number): Promise<void> {
+	return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+export async function acquireLockMutationGuard(
+	bucket: R2Bucket,
+	sidecarConfig: SidecarConfig = DEFAULT_SIDECAR_CONFIG,
+): Promise<LockMutationGuard | null> {
+	let key = getLockMutationGuardKey(sidecarConfig);
+	let token = crypto.randomUUID();
+
+	for (let attempt = 0; attempt < LOCK_MUTATION_GUARD_ATTEMPTS; attempt += 1) {
+		let current = await bucket.get(key);
+		let now = Date.now();
+		let options: R2PutOptions;
+
+		if (current === null) {
+			options = { onlyIf: { etagDoesNotMatch: '*' } };
+		} else {
+			let expiresAt = 0;
+			try {
+				let parsed = JSON.parse(await current.text()) as { expiresAt?: unknown };
+				if (typeof parsed.expiresAt === 'number') {
+					expiresAt = parsed.expiresAt;
+				}
+			} catch {}
+			if (expiresAt > now) {
+				await waitForLockMutationGuard(LOCK_MUTATION_GUARD_RETRY_MS);
+				continue;
+			}
+			options = { onlyIf: { etagMatches: current.etag } };
+		}
+
+		let stored = await bucket.put(
+			key,
+			JSON.stringify({ token, expiresAt: now + LOCK_MUTATION_GUARD_LEASE_MS }),
+			options,
+		);
+		if (stored !== null) {
+			return {
+				async release(): Promise<void> {
+					try {
+						await bucket.put(key, JSON.stringify({ token, expiresAt: 0 }), {
+							onlyIf: { etagMatches: stored.etag },
+						});
+					} catch {}
+				},
+			};
+		}
+
+		await waitForLockMutationGuard(LOCK_MUTATION_GUARD_RETRY_MS);
 	}
 
 	return null;
