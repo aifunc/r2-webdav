@@ -94,7 +94,7 @@ export async function handleCopy(
 	if (resource.isCollection && destinationExists) {
 		// 内部 DELETE 继承目标相关 If 条件与锁 token；源 ETag 条件由外层校验。
 		let deleteResponse = await handleDelete(
-			new Request(new URL(destinationTarget.header), {
+			new Request(new URL(destinationTarget.header, request.url), {
 				method: 'DELETE',
 				headers: buildForwardedDeleteHeaders(request, destinationTarget.path),
 			}),
@@ -227,7 +227,7 @@ export async function handleMove(
 	if (destinationExists) {
 		// 见 handleCopy 中同段注释：内部 DELETE 只继承目标相关条件。
 		let deleteResponse = await handleDelete(
-			new Request(new URL(destinationTarget.header), {
+			new Request(new URL(destinationTarget.header, request.url), {
 				method: 'DELETE',
 				headers: buildForwardedDeleteHeaders(request, destinationTarget.path),
 			}),

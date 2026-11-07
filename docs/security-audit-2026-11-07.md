@@ -52,7 +52,7 @@
 | A11  | 已修复                | `isDocumentElementNamed` 检查 `documentElement !== null`，无根 XML 由入口作为无效请求处理，不再抛未捕获异常。                                                                                                                                                                                                                                                                       |
 | A12  | 已修复（升级后 0 条） | Wrangler 升至 **4.158.0**，带入 Miniflare 5.20261104.0-beta、Undici 7.30.1、sharp 0.35.5；隔离 audit 0。unit/typecheck/clean `npm ci`/dev smoke 通过；Miniflare 5 beta 兼容性仍属残余风险，未跑 litmus。                                                                                                                                                                            |
 
-验证结果：`npm run test:unit` **170/170 通过**（新增 28 条安全回归），`npx tsc --noEmit` 通过；对修改的源码、测试、配置和四份文档执行 Prettier check 通过。修复后复现脚本确认大小写、无效 Depth 保留目标、MOVE 子树锁、并发文件/目录锁、If/If-Match、prefixed LOCK、rootless XML、PROPPATCH 顺序、SVG/HTML 附件化等行为均已改变；并发文件锁与主要变更方法由 Durable Object 守卫串行化，本地 dev 已验证根路径 LOCK 对子资源 PUT 返回 423、并发文件 LOCK 为一个 201 加一个 423；新增回归还覆盖缺失 DO binding 时写请求 503，以及超深 XML 被拒绝。绕开 dispatch 的路径仍按上表保留边界。
+验证结果：`npm run test:unit` **175/175 通过**（新增 33 条安全回归），`npx tsc --noEmit` 通过；对修改的源码、测试、配置和四份文档执行 Prettier check 通过。修复后复现脚本确认大小写、无效 Depth 保留目标、MOVE 子树锁、并发文件/目录锁、If/If-Match、prefixed LOCK、rootless XML、PROPPATCH 顺序、SVG/HTML 附件化等行为均已改变；并发文件锁与主要变更方法由 Durable Object 守卫串行化，本地 dev 已验证根路径 LOCK 对子资源 PUT 返回 423、并发文件 LOCK 为一个 201 加一个 423；新增回归还覆盖缺失 DO binding 时写请求 503，以及超深 XML 被拒绝。绕开 dispatch 的路径仍按上表保留边界。
 
 ## 重新审计：修复引入的回归（2026-11-07）
 
@@ -60,22 +60,24 @@
 
 - **内部 DELETE 继承源 ETag**：COPY 覆盖集合、MOVE 覆盖文件时，`transfer.ts` 会先对目标调用 `handleDelete`，并转发源请求头。原实现把 `If` 原样转发；A06 的 `evaluateIfHeaderConditions` 在内部 DELETE 中按目标 URL 求值，源 ETag 被拿去匹配目标 ETag，导致带有效源 `If` 的 COPY collection / MOVE file 返回 412（应为 204）。
 - **修复**：新增 `buildInternalDeleteIfHeader(ifHeader, requestUrl, targetPath)`。无标签列表只保留正向锁 token（源 ETag 已由外层校验）；标签指向目标或目标后代的列表原样保留，使目标 ETag、后代锁 token 继续生效；`buildForwardedDeleteHeaders` 使用过滤后的 `If`，并继续转发 `Lock-Token`。
-- **回归覆盖**：`COPY collection evaluates If conditions against the source when overwriting`、`MOVE evaluates If conditions against the source when overwriting`、`internal DELETE forwards only lock tokens from If`、`internal DELETE preserves target-tagged If conditions`。复测 **170/170** 通过，`tsc`/Prettier 通过。
+- **回归覆盖**：`COPY collection evaluates If conditions against the source when overwriting`、`MOVE evaluates If conditions against the source when overwriting`、`internal DELETE forwards only lock tokens from If`、`internal DELETE preserves target-tagged If conditions`。复测 **175/175** 通过，`tsc`/Prettier 通过。
 
-本轮未发现其他已证实的新高危/中危回归；以下为仍存在的边界，其中部分是修复前已存在，不能误报为本次引入：
+本轮确认的 A06 回归已修复；随后继续修复了上一轮列出的可修残余：
 
-| 项目               | 性质                   | 说明                                                                                                                                                              |
-| ------------------ | ---------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `DAV:no-lock` 语义 | 修复前已存在           | 未锁资源 `If: (<DAV:no-lock>)` 返回 412、`If: (Not <DAV:no-lock>)` 可删除；基线代码同样如此，未完整实现 RFC 4918 的 no-lock 条件。                                |
-| LOCK body 命名空间 | 本次兼容性回归（低危） | `parseLockRequest` 要求 DAV 命名空间；无 `xmlns="DAV:"` 的旧式 LOCK body 从 2xx 变为 400。标准客户端应带命名空间，但没有做宽松兼容。                              |
-| 旧 dead property   | 修复前已存在           | 旧 metadata 的 `valueXml` 在 PROPFIND 中仍原样拼回；A01 的 `requireWellFormed` 与 DAV 后代检查只约束新写入，未迁移/清洗旧数据。                                   |
-| DO 租约与容量      | 新架构残余             | 单实例全局守卫，120 秒 lease；超过 lease 的慢 PUT/COPY 可被后续写绕过；每请求最多 256 条 guard 记录、无总条目上限，认证用户可用大量深路径并发写放大 DO 存储/CPU。 |
-| 目标父目录预创建   | 修复前已存在           | `ensureDestinationParentExists` 在目标 `If-Match`/`If-Unmodified-Since` 求值前创建父目录；失败请求可能留下父目录。                                                |
-| 相对 Destination   | 修复前已存在           | 内部 DELETE 对 `destinationTarget.header` 直接 `new URL(...)`；极端相对值可能抛未捕获异常。                                                                       |
-| R2 带外写入        | 架构边界               | R2 公开 API 无条件 delete，DO 只协调经 Worker 的请求；直接改 bucket 的写入不受保护。                                                                              |
+- **`DAV:no-lock`**：`evaluateIfHeaderConditions` 现在用 `hasAnyLockForPath` 读取目标的有效锁状态；未锁资源上 `<DAV:no-lock>` 为真、`Not <DAV:no-lock>` 为假，有锁时相反。正向 `DAV:no-lock` 不再被当作无效 token 提交。
+- **LOCK 命名空间兼容**：`parseLockRequest` 接受 DAV 命名空间或未限定命名空间；其他命名空间仍拒绝，保留结构校验。
+- **旧 dead property**：`parseDeadProperty` 重新解析 `valueXml`（沿用属性的默认命名空间）并拒绝 DAV 命名空间后代，旧 metadata 不能再注入 `<response>` 等协议结构；无法解析的旧值会被忽略。
+- **相对 Destination**：内部 DELETE 现在使用 `new URL(destinationTarget.header, request.url)`，相对目标不再抛未捕获异常。
+- **目标父目录预创建条目不成立**：`ensureDestinationParentExists` 和 `ensureParentCollectionResource` 只检查、不创建父目录；上一版报告误写为“创建”，已从残余表移除。
 
-结论：修复没有引入新的高/中危可利用路径；发现的 A06 条件回归已修复并有回归覆盖。剩余项属于兼容性、旧数据、租约/容量或 R2 存储层边界，已在上文对应 A05/A06/A07/A12 段落保留。
+仍存在的边界：
 
+| 项目          | 性质       | 说明                                                                                                                                                              |
+| ------------- | ---------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| DO 租约与容量 | 新架构残余 | 单实例全局守卫，120 秒 lease；超过 lease 的慢 PUT/COPY 可被后续写绕过；每请求最多 256 条 guard 记录、无总条目上限，认证用户可用大量深路径并发写放大 DO 存储/CPU。 |
+| R2 带外写入   | 架构边界   | R2 公开 API 无条件 delete，DO 只协调经 Worker 的请求；直接改 bucket 的写入不受保护。                                                                              |
+
+结论：修复没有引入新的高/中危可利用路径；A06 条件回归、`DAV:no-lock`、LOCK 命名空间兼容、旧 dead property 值和相对 Destination 已修复并有回归覆盖；DO 租约/容量和 R2 存储层边界保留为架构残余。
 `package.json` 初版声明 `@xmldom/xmldom: ^0.8.11`，当时实际锁定并安装的是 **0.8.13**；现已升到 **0.8.15**。已逐条取回完整官方公告并交叉检查精确版本查询：0.8.13 命中 **10 条 GHSA（npm 分级为 8 high、2 moderate）**。初次只读 npm audit 只返回这一个包；网络恢复后的两次独立审计均返回 5 个受影响包条目、36 条独立 GHSA，其他 26 条来自开发链，见 A12。这不是十个 xmldom 漏洞包，也不是十个全部已证实可利用的应用漏洞。
 
 其中以下公告的受影响范围均为 `>=0.7.0 <=0.8.14`，覆盖实际版本，并与当前解析调用路径相符：
@@ -85,7 +87,7 @@
 - [GHSA-965w-775f-mr7g](https://github.com/advisories/GHSA-965w-775f-mr7g)：二次内存消耗。
 - [GHSA-93r5-fhx6-vmg9](https://github.com/advisories/GHSA-93r5-fhx6-vmg9)：错误恢复与文本合并的二次解析成本。
 
-`PROPFIND` 在 `methods/propfind.ts:146` / `:150`，`PROPPATCH` 在 `methods/proppatch.ts:49` / `:53`，均进入 `xml.ts:169` 的 DOMParser。解析是同步的；应用积累错误并等到解析结束后才拒绝请求。1 MiB 的流式大小限制有效，但不限制属性数、深度、命名空间数或解析总操作量。`LOCK` 走正则，不属于这里的 xmldom 入口。
+`PROPFIND` 在 `methods/propfind.ts:146` / `:150`，`PROPPATCH` 在 `methods/proppatch.ts:49` / `:53`，均进入 `xml.ts:169` 的 DOMParser。解析是同步的；应用积累错误并等到解析结束后才拒绝请求。1 MiB 的流式大小限制有效，但不限制属性数、深度、命名空间数或解析总操作量。`LOCK` 现在走 `parseLockRequest` 的命名空间感知 XML 解析，同样进入该 DOMParser 入口。
 
 使用实际应用的 `parsePropfindRequest` 对合法、扁平 XML 做了受控测量；每档三次取中位数，Node v24.22.2，进程堆上限 128 MiB，最大输入小于 160 KiB：
 
@@ -103,7 +105,7 @@
 
 **已核实的修复目标：** 当前 0.8 分支应至少更新到已发布的 **[0.8.15](https://github.com/xmldom/xmldom/releases/tag/0.8.15)**，`0.8.14` 仍在多条受影响范围内。0.9 分支对应 **0.9.12**，但不能直接替换：该版本的 [DOMParser 源码](https://raw.githubusercontent.com/xmldom/xmldom/0.9.12/lib/dom-parser.js) 对当前应用正在使用的对象形式 `errorHandler` 抛出 `errorHandler object is no longer supported, switch to onError!`，需要迁移错误回调和异常处理。
 
-**序列化防护已启用：** `src/webdav/xml.ts` 的 `serializeNodeChildren` 现在通过 `XMLSerializer.serializeToString(child, false, undefined, { requireWellFormed: true })` 序列化；遇到非法 PI target、DocType name 或其他不合规节点时返回 `null`，PROPPATCH/LOCK 解析随即将请求判为无效，而不是把原始节点拼回响应。回归覆盖 `<?xml?>` 非法 PI 被拒绝、合法 `<?xml-stylesheet?>` 仍可通过。**修复状态：** 已升级到 0.8.15、更新锁文件并启用该选项；0.9.12 因对象形式 `errorHandler` 兼容问题未采用。解析后的结构预算已加入 `src/webdav/xml.ts`：最多 20,000 个节点、元素嵌套深度 64、属性总数 5,000；超限请求按无效 XML 拒绝。该限制发生在解析之后，不能替代解析器自身的复杂度修复，但可阻止超大结构进入后续遍历/序列化。序列化校验启用也不等于已证明所有 dead property 输入都安全。
+**序列化防护已启用：** `src/webdav/xml.ts` 的 `serializeNodeChildren` 现在通过 `XMLSerializer.serializeToString(child, false, undefined, { requireWellFormed: true })` 序列化；遇到非法 PI target、DocType name 或其他不合规节点时返回 `null`，PROPPATCH/LOCK 解析随即将请求判为无效，而不是把原始节点拼回响应。回归覆盖 `<?xml?>` 非法 PI 被拒绝、合法 `<?xml-stylesheet?>` 仍可通过。**修复状态：** 已升级到 0.8.15、更新锁文件并启用该选项；0.9.12 因对象形式 `errorHandler` 兼容问题未采用。解析后的结构预算已加入 `src/webdav/xml.ts`：最多 20,000 个节点、元素嵌套深度 64、属性总数 5,000；超限请求按无效 XML 拒绝。该限制发生在解析之后，不能替代解析器自身的复杂度修复，但可阻止超大结构进入后续遍历/序列化。旧 metadata 的 dead property 在读取时也会重新解析 `valueXml` 并拒绝 DAV 命名空间后代；但这仍不等于已证明所有历史属性名/值组合都安全，不能替代对旧数据的迁移清洗。
 
 ## A02：参数错误也会永久删除目标数据
 
@@ -146,7 +148,7 @@
 
 **建议：** 缺失记录使用条件创建，存在记录使用能代表锁状态变化的版本做条件更新。将文件锁状态放入具有独立版本的记录，或通过 Durable Object 等方式串行化同一资源/层级的锁状态；不要把文件内容 ETag 当作锁元数据版本。应同时验证并发 LOCK、UNLOCK、PUT 与 PROPPATCH。
 
-**修复状态：** 目录 sidecar 首次写已改为 `onlyIf: { etagDoesNotMatch: '*' }`。并发锁与跨方法写操作改由 `src/domain/mutation-guard.ts` 的 `MutationGuardDurableObject` 协调：所有 Worker 实例通过 `idFromName('global')` 访问同一 DO，`acquire` 在 `blockConcurrencyWhile` 中清理过期项并原子检查 shared/exclusive 冲突，`release` 按 token 删除；目标路径取 exclusive，祖先（含根路径）取 shared，因此根路径 LOCK 会阻止子资源 PUT/DELETE，同资源/父子资源冲突返回 423，不同资源可并行。LOCK/UNLOCK 与 dispatch 中的 PUT/DELETE/MKCOL/PROPPATCH/COPY/MOVE 共用该守卫；Worker 层绑定缺失时写请求返回 503；只有直接调用 handler 的测试使用 R2 CAS 回退。DO 使用 SQLite-backed 迁移 `v1`（提交 `06ebf61`），租约 120 秒；本地 dev 已验证根 LOCK 201 → 子资源 PUT 423 → UNLOCK 204 → PUT 204，DO 测试和全量单测 `170/170` 通过。残余是租约过期后旧持有者、绕开 dispatch 直接调用 handler、DO 故障时写请求 fail-closed，以及 R2 带外写入；DO 串行化不是存储级事务。
+**修复状态：** 目录 sidecar 首次写已改为 `onlyIf: { etagDoesNotMatch: '*' }`。并发锁与跨方法写操作改由 `src/domain/mutation-guard.ts` 的 `MutationGuardDurableObject` 协调：所有 Worker 实例通过 `idFromName('global')` 访问同一 DO，`acquire` 在 `blockConcurrencyWhile` 中清理过期项并原子检查 shared/exclusive 冲突，`release` 按 token 删除；目标路径取 exclusive，祖先（含根路径）取 shared，因此根路径 LOCK 会阻止子资源 PUT/DELETE，同资源/父子资源冲突返回 423，不同资源可并行。LOCK/UNLOCK 与 dispatch 中的 PUT/DELETE/MKCOL/PROPPATCH/COPY/MOVE 共用该守卫；Worker 层绑定缺失时写请求返回 503；只有直接调用 handler 的测试使用 R2 CAS 回退。DO 使用 SQLite-backed 迁移 `v1`（提交 `06ebf61`），租约 120 秒；本地 dev 已验证根 LOCK 201 → 子资源 PUT 423 → UNLOCK 204 → PUT 204，DO 测试和全量单测 `175/175` 通过。残余是租约过期后旧持有者、绕开 dispatch 直接调用 handler、DO 故障时写请求 fail-closed，以及 R2 带外写入；DO 串行化不是存储级事务。
 
 ## A06：失效的版本条件未阻止修改
 
@@ -206,7 +208,7 @@
 - **bundle 单列：** Wrangler 的发布说明涉及已打包组件的修复，锁文件不按内嵌模块逐项列出。升级前曾在旧 `node_modules/wrangler/wrangler-dist/cli.js` 中读到内嵌版本（例如 `yaml@2.8.1`、`minimatch@5.1.6`、`brace-expansion@2.0.1`），这些组件也存在版本范围命中；4.158.0 的 bundle 内容已改变，仍需按新 CLI 复核，不能把旧读取结果或 npm 的 36 条当成完整清单，也不能假设升级 CLI 就一定已覆盖全部内嵌依赖。
 - **workerd：** 官方公告中的 [GHSA-8vx6-69vg-c46f](https://github.com/cloudflare/workerd/security/advisories/GHSA-8vx6-69vg-c46f)（CVE-2023-2512）影响 `<1.20230419.0`，当前锁定版本早已超出，且官方说明在 Workers 资源限制下从未可利用；不把它算作当前未修复项。开发链补核报告另列该系统公告中与本项目版本无关或已修复的其余条目。
 
-**升级结果（2026-11-07）：** 已将 `wrangler` 升至 **4.158.0**，锁文件带入 `miniflare 5.20261104.0-beta`、`undici 7.30.1`、`sharp 0.35.5`、`workerd 1.20261104.1`、`esbuild 0.28.2`。`npm ci` 从干净安装成功，`npx tsc --noEmit` 通过，`npm run test:unit` **170/170** 通过，本地 `wrangler dev` 的 `PROPFIND / Depth:0` 返回 207；升级后隔离 `npm audit --package-lock-only` 为 **exit 0、0 条**。这消除的是 npm 可见的开发链公告，不等于 bundle 内嵌模块和所有上游代码已被证明无风险。
+**升级结果（2026-11-07）：** 已将 `wrangler` 升至 **4.158.0**，锁文件带入 `miniflare 5.20261104.0-beta`、`undici 7.30.1`、`sharp 0.35.5`、`workerd 1.20261104.1`、`esbuild 0.28.2`。`npm ci` 从干净安装成功，`npx tsc --noEmit` 通过，`npm run test:unit` **175/175** 通过，本地 `wrangler dev` 的 `PROPFIND / Depth:0` 返回 207；升级后隔离 `npm audit --package-lock-only` 为 **exit 0、0 条**。这消除的是 npm 可见的开发链公告，不等于 bundle 内嵌模块和所有上游代码已被证明无风险。
 
 **残余边界：** Miniflare 5 仍是 beta，Wrangler 4.158.0 的兼容性尚未经过 litmus 和长时间运行验证；bundle 内嵌组件仍需按实际 4.158.0 CLI 重新核对，不能把 npm 0 条当成完整清单。升级前 26 条与升级后 0 条均保留为历史对照。
 
@@ -222,14 +224,14 @@
 
 | 验证                                                  | 结果                                                                                                                                                                                                                                |
 | ----------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `npm run test:unit`                                   | 修复前 **142/142 通过**；修复后 **170/170 通过**（新增 28 条安全回归）                                                                                                                                                              |
+| `npm run test:unit`                                   | 修复前 **142/142 通过**；修复后 **175/175 通过**（新增 33 条安全回归）                                                                                                                                                              |
 | `npx tsc --noEmit`                                    | 通过                                                                                                                                                                                                                                |
 | `npm run check`（全量）                               | 修复前 Prettier 因原有未跟踪 `.agents/`、`.forge/` 和 `skills-lock.json` 共 23 个文件失败；本次对修改文件单独 check 通过                                                                                                            |
 | 对 Git 已跟踪的 TS/JS/JSON/Markdown 做 Prettier check | **通过**，用于定位全量格式失败的来源                                                                                                                                                                                                |
 | 只读 `npm audit`（网络恢复后两次）                    | exit 1；**5 个 high 包条目、36 条独立公告**，是漏洞结果，不是执行错误                                                                                                                                                               |
 | 修复后隔离 `npm audit`（升级 Wrangler 前）            | exit 1；xmldom 已消失，仍为 **4 个 high 包条目、26 条开发链公告**                                                                                                                                                                   |
 | 升级 Wrangler 4.158.0 后隔离 `npm audit`              | **exit 0；0 条公告**；Miniflare 5 beta 仍需兼容性验证                                                                                                                                                                               |
-| `npm ci` 干净安装 + unit/typecheck + dev smoke        | 通过；170/170、tsc 通过、`PROPFIND / Depth:0` 返回 207                                                                                                                                                                              |
+| `npm ci` 干净安装 + unit/typecheck + dev smoke        | 通过；175/175、tsc 通过、`PROPFIND / Depth:0` 返回 207                                                                                                                                                                              |
 | `main-repro.mjs`                                      | 通过；鉴权入口下条件请求、内容响应、文件锁及路径别名重现                                                                                                                                                                            |
 | `reviewer-repro.mjs` / `post-fix-repro.mjs`           | 初版通过并重现错误；修复后版本验证 Depth、子树锁、If、LOCK、PROPPATCH 等新行为                                                                                                                                                      |
 | `xml-complexity-repro.mjs`                            | 通过；128 MiB 堆上限下受控性能测量                                                                                                                                                                                                  |

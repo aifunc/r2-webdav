@@ -10,6 +10,7 @@ import { dispatchHandler } from '../src/app/dispatch.js';
 import { acquireResourceMutationGuard, buildInternalDeleteIfHeader } from '../src/domain/locks.js';
 import { handleCopy, handleLock, handleMove, handleProppatch } from '../src/webdav/index.js';
 import {
+	getDeadProperties,
 	getDeadPropertyKey,
 	parseLockRequest,
 	parsePropfindRequest,
@@ -235,6 +236,81 @@ test('prefixed DAV LOCK XML is parsed by namespace', async () => {
 	let response = await handleLock(request('LOCK', 'file.txt', {}, body), bucket);
 
 	assert.equal(response.status, 201);
+});
+
+test('LOCK XML without a namespace remains accepted', async () => {
+	let bucket = createBucket([createObject('file.txt', { bodyText: 'data' })]);
+	let body =
+		'<lockinfo><lockscope><exclusive/></lockscope><locktype><write/></locktype><owner>audit</owner></lockinfo>';
+	let response = await handleLock(request('LOCK', 'file.txt', {}, body), bucket);
+
+	assert.equal(response.status, 201);
+});
+
+test('LOCK XML with a foreign namespace is rejected', async () => {
+	let bucket = createBucket([createObject('file.txt', { bodyText: 'data' })]);
+	let body = '<lockinfo xmlns="urn:evil"><lockscope><exclusive/></lockscope><locktype><write/></locktype></lockinfo>';
+	let response = await handleLock(request('LOCK', 'file.txt', {}, body), bucket);
+
+	assert.equal(response.status, 400);
+});
+
+test('DAV:no-lock conditions follow the effective lock state', async () => {
+	let proppatchBody =
+		'<propertyupdate xmlns="DAV:"><set><prop><displayname>x</displayname></prop></set></propertyupdate>';
+	let unlockedBucket = createBucket([createObject('file.txt', { bodyText: 'data' })]);
+	let unlockedPositive = await handleProppatch(
+		request('PROPPATCH', 'file.txt', { If: '(<DAV:no-lock>)' }, proppatchBody),
+		unlockedBucket,
+	);
+	assert.equal(unlockedPositive.status, 207);
+
+	let unlockedNegative = await handleProppatch(
+		request('PROPPATCH', 'file.txt', { If: '(Not <DAV:no-lock>)' }, proppatchBody),
+		unlockedBucket,
+	);
+	assert.equal(unlockedNegative.status, 412);
+
+	let lockBody = '<lockinfo xmlns="DAV:"><lockscope><exclusive/></lockscope><locktype><write/></locktype></lockinfo>';
+	let lockedBucket = createBucket([createObject('file.txt', { bodyText: 'data' })]);
+	let lockResponse = await handleLock(request('LOCK', 'file.txt', { Depth: '0' }, lockBody), lockedBucket);
+	assert.equal(lockResponse.status, 201);
+
+	let lockedPositive = await handleProppatch(
+		request('PROPPATCH', 'file.txt', { If: '(<DAV:no-lock>)' }, proppatchBody),
+		lockedBucket,
+	);
+	assert.equal(lockedPositive.status, 412);
+
+	let lockedNegative = await handleProppatch(
+		request('PROPPATCH', 'file.txt', { If: '(Not <DAV:no-lock>)' }, proppatchBody),
+		lockedBucket,
+	);
+	assert.equal(lockedNegative.status, 423);
+});
+
+test('legacy dead property values with DAV descendants are ignored', () => {
+	let key = getDeadPropertyKey('urn:test', 'legacy');
+	let property = (valueXml, namespaceURI = 'urn:test') =>
+		JSON.stringify({ namespaceURI, localName: 'legacy', prefix: null, valueXml });
+	let safe = property('<child xmlns="urn:test">ok</child>');
+	let injected = property('<response xmlns="DAV:">bad</response>');
+	let inherited = property('<response>bad</response>', 'DAV:');
+
+	assert.equal(getDeadProperties({ [key]: safe }).length, 1);
+	assert.deepEqual(getDeadProperties({ [key]: injected }), []);
+	assert.deepEqual(getDeadProperties({ [key]: inherited }), []);
+});
+
+test('COPY collection handles a relative Destination when overwriting', async () => {
+	let bucket = createBucket([
+		createObject('source', { bodyText: '', customMetadata: { resourcetype: '<collection />' } }),
+		createObject('source/a.txt', { bodyText: 'a' }),
+		createObject('target', { bodyText: '', customMetadata: { resourcetype: '<collection />' } }),
+	]);
+	let response = await handleCopy(request('COPY', 'source/', { Destination: '../target/', Depth: '0' }), bucket);
+
+	assert.equal(response.status, 204);
 });
 
 test('worker fails closed when the mutation guard binding is missing', async () => {

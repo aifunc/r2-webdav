@@ -463,7 +463,34 @@ function matchEtagConditions(conditions: IfHeaderStateCondition[], resource: R2O
 		);
 }
 
-async function evaluateIfHeaderConditions(request: Request, bucket: R2Bucket): Promise<boolean | null> {
+async function hasAnyLockForPath(
+	bucket: R2Bucket,
+	resourcePath: string,
+	sidecarConfig: SidecarConfig,
+): Promise<boolean> {
+	for (const candidate of getAncestorPaths(resourcePath)) {
+		let [resource, sidecarResult] = await Promise.all([
+			bucket.head(candidate),
+			readDirectorySidecarLockDetails(bucket, candidate, sidecarConfig),
+		]);
+		if (resource !== null && resource.customMetadata?.resourcetype !== '<collection />') {
+			sidecarResult = { exists: false, locks: [] };
+		}
+		let lockDetails = sidecarResult.exists
+			? filterScopedLockDetails(resourcePath, candidate, sidecarResult.locks)
+			: getScopedLockDetails(resourcePath, candidate, resource?.customMetadata);
+		if (lockDetails.length > 0) {
+			return true;
+		}
+	}
+	return false;
+}
+
+async function evaluateIfHeaderConditions(
+	request: Request,
+	bucket: R2Bucket,
+	sidecarConfig: SidecarConfig = DEFAULT_SIDECAR_CONFIG,
+): Promise<boolean | null> {
 	let ifHeader = request.headers.get('If');
 	if (ifHeader === null || ifHeader.trim() === '') {
 		return null;
@@ -484,8 +511,21 @@ async function evaluateIfHeaderConditions(request: Request, bucket: R2Bucket): P
 	// RFC 4918 §10.4.2：只要有一个条件列表为真即可；没有标签的列表作用于 Request-URI，
 	// 带标签的列表作用于标签资源。token 条件此处先视为可满足，随后逐资源校验 token。
 	for (const { conditions, tagPath } of conditionLists) {
-		let resource = tagPath === null || tagPath === requestPath ? requestResource : await bucket.head(tagPath);
-		if (matchEtagConditions(conditions, resource)) {
+		let conditionPath = tagPath === null ? requestPath : tagPath;
+		let resource = conditionPath === requestPath ? requestResource : await bucket.head(conditionPath);
+		let hasNoLockCondition = conditions.some(
+			(condition) => condition.kind === 'token' && condition.value.trim().toLowerCase() === 'dav:no-lock',
+		);
+		let locked = hasNoLockCondition ? await hasAnyLockForPath(bucket, conditionPath, sidecarConfig) : false;
+		// DAV:no-lock 是特殊状态 token：未锁资源上 `<DAV:no-lock>` 为真，
+		// `Not <DAV:no-lock>` 为假；资源被任何锁覆盖时相反。
+		let noLockMatches = conditions.every((condition) => {
+			if (condition.kind !== 'token' || condition.value.trim().toLowerCase() !== 'dav:no-lock') {
+				return true;
+			}
+			return condition.negated ? locked : !locked;
+		});
+		if (noLockMatches && matchEtagConditions(conditions, resource)) {
 			return true;
 		}
 	}
@@ -499,7 +539,7 @@ function collectPositiveLockTokens(conditions: IfHeaderStateCondition[]): string
 		}
 
 		let token = normalizeLockToken(condition.value);
-		return token === '' ? [] : [token];
+		return token === '' || token.toLowerCase() === 'dav:no-lock' ? [] : [token];
 	});
 }
 
@@ -612,7 +652,7 @@ export async function assertLockPermission(
 	options: { ignoreSharedLocksOnTarget?: boolean } = {},
 ): Promise<Response | null> {
 	let requestResource = resourcePath === '' ? null : await bucket.head(resourcePath);
-	let ifHeaderResult = await evaluateIfHeaderConditions(request, bucket);
+	let ifHeaderResult = await evaluateIfHeaderConditions(request, bucket, sidecarConfig);
 	if (ifHeaderResult === false) {
 		return createLockFailureResponse('preconditionFailed');
 	}

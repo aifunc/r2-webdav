@@ -106,7 +106,11 @@ function isDeadProperty(value: Partial<DeadProperty> | null | undefined): value 
 function parseDeadProperty(value: string): DeadProperty | null {
 	try {
 		let parsed = JSON.parse(value) as Partial<DeadProperty>;
-		return isDeadProperty(parsed) ? (parsed as DeadProperty) : null;
+		if (!isDeadProperty(parsed)) {
+			return null;
+		}
+		let property = parsed as DeadProperty;
+		return isSafeStoredPropertyValue(property) ? property : null;
 	} catch {
 		return null;
 	}
@@ -153,6 +157,23 @@ function hasDavNamespaceDescendant(node: Node): boolean {
 		}
 	}
 	return false;
+}
+
+function isSafeStoredPropertyValue(property: DeadProperty): boolean {
+	if (property.valueXml.trim() === '') {
+		return true;
+	}
+	// 旧 metadata 的 valueXml 会原样拼回 PROPFIND；重新解析并拒绝 DAV 命名空间后代，
+	// 防止历史数据注入 <response> 等协议层结构。默认命名空间沿用属性命名空间，
+	// 以覆盖“未加前缀的子元素继承 DAV 默认命名空间”的情况。
+	let namespaceDeclaration = property.namespaceURI === '' ? '' : ` xmlns="${escapeXml(property.namespaceURI)}"`;
+	let document = parseXmlDocument(
+		`<dead-property-value${namespaceDeclaration}>${property.valueXml}</dead-property-value>`,
+	);
+	if (document === null || document.documentElement === null) {
+		return false;
+	}
+	return !hasDavNamespaceDescendant(document.documentElement);
 }
 
 function getElementProperty(element: Element): DeadProperty | null {
@@ -259,8 +280,9 @@ function getPropfindPropertiesRequest(propElement: Element): PropfindRequest | n
 	};
 }
 
-function isDavElement(element: Element, name: string): boolean {
-	return element.namespaceURI === DAV_NAMESPACE && hasLocalName(element, name);
+function isLockElement(element: Element, name: string): boolean {
+	let namespaceURI = element.namespaceURI;
+	return hasLocalName(element, name) && (namespaceURI === DAV_NAMESPACE || !namespaceURI);
 }
 
 export type ParsedLockRequest = {
@@ -270,25 +292,25 @@ export type ParsedLockRequest = {
 
 export function parseLockRequest(body: string): ParsedLockRequest | null {
 	let document = parseXmlDocument(body);
-	if (document === null || document.documentElement === null || !isDavElement(document.documentElement, 'lockinfo')) {
+	if (document === null || document.documentElement === null || !isLockElement(document.documentElement, 'lockinfo')) {
 		return null;
 	}
 
 	let root = document.documentElement;
-	let lockscope = getChildElements(root).find((child) => isDavElement(child, 'lockscope'));
-	let locktype = getChildElements(root).find((child) => isDavElement(child, 'locktype'));
+	let lockscope = getChildElements(root).find((child) => isLockElement(child, 'lockscope'));
+	let locktype = getChildElements(root).find((child) => isLockElement(child, 'locktype'));
 	if (lockscope === undefined || locktype === undefined) {
 		return null;
 	}
 	let scopeElement = getChildElements(lockscope).find(
-		(child) => isDavElement(child, 'shared') || isDavElement(child, 'exclusive'),
+		(child) => isLockElement(child, 'shared') || isLockElement(child, 'exclusive'),
 	);
-	let writeElement = getChildElements(locktype).find((child) => isDavElement(child, 'write'));
+	let writeElement = getChildElements(locktype).find((child) => isLockElement(child, 'write'));
 	if (scopeElement === undefined || writeElement === undefined) {
 		return null;
 	}
 
-	let ownerElement = getChildElements(root).find((child) => isDavElement(child, 'owner'));
+	let ownerElement = getChildElements(root).find((child) => isLockElement(child, 'owner'));
 	let owner: string | undefined;
 	if (ownerElement !== undefined) {
 		let serializedOwner = serializeNodeChildren(ownerElement);
