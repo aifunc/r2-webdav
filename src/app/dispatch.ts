@@ -3,7 +3,13 @@ import { DEFAULT_SIDECAR_CONFIG } from '../shared/sidecar';
 import { createTextResponse } from '../webdav/responses';
 import { handleDelete, handleGet, handleHead, handleMkcol, handlePut } from '../webdav/http/handlers';
 import { handleCopy, handleLock, handleMove, handlePropfind, handleProppatch, handleUnlock } from '../webdav/index.js';
-import { InvalidResourcePathError, isReservedWebdavNamespace, makeResourcePath } from '../domain/path';
+import { acquireResourceMutationGuards } from '../domain/locks';
+import {
+	InvalidResourcePathError,
+	isReservedWebdavNamespace,
+	makeResourcePath,
+	parseDestinationPath,
+} from '../domain/path';
 import type { SidecarConfig } from '../shared/types';
 
 type MethodHandler = (request: Request, bucket: R2Bucket, sidecarConfig: SidecarConfig) => Promise<Response>;
@@ -28,6 +34,8 @@ function methodNotAllowedResponse(): Response {
 		headers: buildDavHeaders(),
 	});
 }
+
+const MUTATING_METHODS = new Set(['PUT', 'DELETE', 'MKCOL', 'PROPPATCH', 'COPY', 'MOVE']);
 
 const METHOD_HANDLERS: Record<string, MethodHandler> = {
 	HEAD: handleHead,
@@ -66,5 +74,29 @@ export async function dispatchHandler(
 	}
 
 	let handler = METHOD_HANDLERS[request.method];
-	return handler ? handler(request, bucket, sidecarConfig) : methodNotAllowedResponse();
+	if (handler === undefined) {
+		return methodNotAllowedResponse();
+	}
+
+	if (MUTATING_METHODS.has(request.method)) {
+		let resourcePaths = [resourcePath];
+		if (request.method === 'COPY' || request.method === 'MOVE') {
+			let destinationHeader = request.headers.get('Destination');
+			let destinationPath = destinationHeader === null ? null : parseDestinationPath(destinationHeader, request.url);
+			if (destinationPath !== null && !isReservedWebdavNamespace(destinationPath, sidecarConfig)) {
+				resourcePaths.push(destinationPath);
+			}
+		}
+		let guard = await acquireResourceMutationGuards(bucket, resourcePaths, sidecarConfig);
+		if (guard === null) {
+			return createTextResponse('locked');
+		}
+		try {
+			return await handler(request, bucket, sidecarConfig);
+		} finally {
+			await guard.release();
+		}
+	}
+
+	return handler(request, bucket, sidecarConfig);
 }

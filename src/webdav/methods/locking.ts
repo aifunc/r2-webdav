@@ -1,6 +1,6 @@
 import { DEAD_PROPERTY_PREFIX } from '../../shared/constants';
 import {
-	acquireLockMutationGuard,
+	acquireResourceMutationGuard,
 	assertLockPermission,
 	assertNoDescendantLockConflicts,
 	determineLockDepth,
@@ -52,7 +52,8 @@ export async function handleLock(
 	bucket: R2Bucket,
 	sidecarConfig: SidecarConfig = DEFAULT_SIDECAR_CONFIG,
 ): Promise<Response> {
-	let guard = await acquireLockMutationGuard(bucket, sidecarConfig);
+	let resourcePath = makeResourcePath(request);
+	let guard = await acquireResourceMutationGuard(bucket, resourcePath, sidecarConfig);
 	if (guard === null) {
 		return createTextResponse('locked');
 	}
@@ -291,7 +292,8 @@ export async function handleUnlock(
 	bucket: R2Bucket,
 	sidecarConfig: SidecarConfig = DEFAULT_SIDECAR_CONFIG,
 ): Promise<Response> {
-	let guard = await acquireLockMutationGuard(bucket, sidecarConfig);
+	let resourcePath = makeResourcePath(request);
+	let guard = await acquireResourceMutationGuard(bucket, resourcePath, sidecarConfig);
 	if (guard === null) {
 		return createTextResponse('locked');
 	}

@@ -5,7 +5,8 @@ import { test } from 'node:test';
 import { parseDirectorySidecar, serializeDirectorySidecar, updateDirectorySidecar } from '../src/domain/directories.js';
 import { decodeResourcePath, InvalidResourcePathError } from '../src/domain/path.js';
 import { handleDelete, handleGet } from '../src/webdav/http/handlers.js';
-import { acquireLockMutationGuard } from '../src/domain/locks.js';
+import { dispatchHandler } from '../src/app/dispatch.js';
+import { acquireResourceMutationGuard } from '../src/domain/locks.js';
 import { handleCopy, handleLock, handleMove, handleProppatch } from '../src/webdav/index.js';
 import { getDeadPropertyKey, parsePropfindRequest, parseProppatchRequest } from '../src/webdav/xml.js';
 import { normalizeDepthHeader, parseOverwriteHeader } from '../src/webdav/responses.js';
@@ -290,14 +291,48 @@ test('plain text may remain inline', async () => {
 
 test('lock mutation guard serializes acquisition and can be released', async () => {
 	let bucket = createConditionalBucket();
-	let first = await acquireLockMutationGuard(bucket);
+	let first = await acquireResourceMutationGuard(bucket, 'docs/file.txt');
 	assert.ok(first);
-	let second = await acquireLockMutationGuard(bucket);
+	let second = await acquireResourceMutationGuard(bucket, 'docs/file.txt');
 	assert.equal(second, null);
 	await first.release();
-	let third = await acquireLockMutationGuard(bucket);
+	let third = await acquireResourceMutationGuard(bucket, 'docs/file.txt');
 	assert.ok(third);
 	await third.release();
+});
+
+test('dispatch guards both source and destination for COPY', async () => {
+	let bucket = createConditionalBucket();
+	let destinationGuard = await acquireResourceMutationGuard(bucket, 'docs/target.txt');
+	assert.ok(destinationGuard);
+	let response = await dispatchHandler(
+		new Request('http://example.com/docs/source.txt', {
+			method: 'COPY',
+			headers: { Destination: 'http://example.com/docs/target.txt' },
+		}),
+		bucket,
+	);
+	assert.equal(response.status, 423);
+	await destinationGuard.release();
+});
+
+test('mutation guards are sharded by resource path', async () => {
+	let bucket = createConditionalBucket();
+	let first = await acquireResourceMutationGuard(bucket, 'docs/a.txt');
+	assert.ok(first);
+	let second = await acquireResourceMutationGuard(bucket, 'docs/b.txt');
+	assert.ok(second);
+	let siblingParent = await acquireResourceMutationGuard(bucket, 'other/a.txt');
+	assert.ok(siblingParent);
+	await first.release();
+	await second.release();
+	await siblingParent.release();
+
+	let parent = await acquireResourceMutationGuard(bucket, 'docs');
+	assert.ok(parent);
+	let child = await acquireResourceMutationGuard(bucket, 'docs/child.txt');
+	assert.equal(child, null);
+	await parent.release();
 });
 
 test('concurrent file LOCK requests produce one success', async () => {

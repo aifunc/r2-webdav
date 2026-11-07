@@ -712,72 +712,208 @@ export async function assertRecursiveDeletePermission(
 	return null;
 }
 
-const LOCK_MUTATION_GUARD_LEASE_MS = 30_000;
+const LOCK_MUTATION_GUARD_LEASE_MS = 120_000;
 const LOCK_MUTATION_GUARD_RETRY_MS = 15;
 const LOCK_MUTATION_GUARD_ATTEMPTS = 40;
+
+type LockMutationGuardMode = 'shared' | 'exclusive';
+
+interface LockMutationGuardEntry {
+	token: string;
+	expiresAt: number;
+}
+
+interface LockMutationGuardRecord {
+	exclusive: LockMutationGuardEntry | null;
+	shared: LockMutationGuardEntry[];
+}
+
+interface LockMutationGuardRequest {
+	key: string;
+	mode: LockMutationGuardMode;
+}
 
 export interface LockMutationGuard {
 	release(): Promise<void>;
 }
 
-function getLockMutationGuardKey(sidecarConfig: SidecarConfig): string {
-	return `${getSidecarPrefix(sidecarConfig)}/.lock-mutation-guard`;
+function emptyLockMutationGuardRecord(): LockMutationGuardRecord {
+	return { exclusive: null, shared: [] };
+}
+
+function parseLockMutationGuardRecord(text: string): LockMutationGuardRecord {
+	let now = Date.now();
+	let parsed = JSON.parse(text) as {
+		exclusive?: LockMutationGuardEntry | null;
+		shared?: LockMutationGuardEntry[];
+	};
+	let exclusive = parsed.exclusive && parsed.exclusive.expiresAt > now ? parsed.exclusive : null;
+	let shared = Array.isArray(parsed.shared) ? parsed.shared.filter((entry) => entry.expiresAt > now) : [];
+	return { exclusive, shared };
+}
+
+async function getLockMutationGuardKey(sidecarConfig: SidecarConfig, resourcePath: string): Promise<string> {
+	let digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(resourcePath));
+	let hash = [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+	return `${getSidecarPrefix(sidecarConfig)}/.lock-mutation-guards/${hash}`;
 }
 
 function waitForLockMutationGuard(ms: number): Promise<void> {
 	return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-export async function acquireLockMutationGuard(
+async function readLockMutationGuard(
 	bucket: R2Bucket,
-	sidecarConfig: SidecarConfig = DEFAULT_SIDECAR_CONFIG,
-): Promise<LockMutationGuard | null> {
-	let key = getLockMutationGuardKey(sidecarConfig);
-	let token = crypto.randomUUID();
+	key: string,
+): Promise<{ current: R2ObjectBody | null; record: LockMutationGuardRecord }> {
+	let current = await bucket.get(key);
+	if (current === null) {
+		return { current: null, record: emptyLockMutationGuardRecord() };
+	}
+	try {
+		return { current, record: parseLockMutationGuardRecord(await current.text()) };
+	} catch {
+		return { current, record: emptyLockMutationGuardRecord() };
+	}
+}
 
-	for (let attempt = 0; attempt < LOCK_MUTATION_GUARD_ATTEMPTS; attempt += 1) {
-		let current = await bucket.get(key);
-		let now = Date.now();
-		let options: R2PutOptions;
+async function putLockMutationGuard(
+	bucket: R2Bucket,
+	key: string,
+	record: LockMutationGuardRecord,
+	current: R2ObjectBody | null,
+): Promise<R2Object | null> {
+	return bucket.put(key, JSON.stringify(record), {
+		onlyIf: current === null ? { etagDoesNotMatch: '*' } : { etagMatches: current.etag },
+	});
+}
 
-		if (current === null) {
-			options = { onlyIf: { etagDoesNotMatch: '*' } };
-		} else {
-			let expiresAt = 0;
-			try {
-				let parsed = JSON.parse(await current.text()) as { expiresAt?: unknown };
-				if (typeof parsed.expiresAt === 'number') {
-					expiresAt = parsed.expiresAt;
-				}
-			} catch {}
-			if (expiresAt > now) {
-				await waitForLockMutationGuard(LOCK_MUTATION_GUARD_RETRY_MS);
-				continue;
-			}
-			options = { onlyIf: { etagMatches: current.etag } };
+async function tryAcquireLockMutationGuard(
+	bucket: R2Bucket,
+	request: LockMutationGuardRequest,
+	token: string,
+): Promise<R2Object | null> {
+	let { current, record } = await readLockMutationGuard(bucket, request.key);
+	let expiresAt = Date.now() + LOCK_MUTATION_GUARD_LEASE_MS;
+
+	if (request.mode === 'shared') {
+		if (record.exclusive !== null) {
+			return null;
 		}
-
-		let stored = await bucket.put(
-			key,
-			JSON.stringify({ token, expiresAt: now + LOCK_MUTATION_GUARD_LEASE_MS }),
-			options,
-		);
-		if (stored !== null) {
-			return {
-				async release(): Promise<void> {
-					try {
-						await bucket.put(key, JSON.stringify({ token, expiresAt: 0 }), {
-							onlyIf: { etagMatches: stored.etag },
-						});
-					} catch {}
-				},
-			};
+		record.shared.push({ token, expiresAt });
+	} else {
+		if (record.exclusive !== null || record.shared.length > 0) {
+			return null;
 		}
-
-		await waitForLockMutationGuard(LOCK_MUTATION_GUARD_RETRY_MS);
+		record.exclusive = { token, expiresAt };
 	}
 
-	return null;
+	return putLockMutationGuard(bucket, request.key, record, current);
+}
+
+async function releaseLockMutationGuard(
+	bucket: R2Bucket,
+	request: LockMutationGuardRequest,
+	token: string,
+): Promise<void> {
+	for (let attempt = 0; attempt < 5; attempt += 1) {
+		try {
+			let { current, record } = await readLockMutationGuard(bucket, request.key);
+			if (current === null) {
+				return;
+			}
+
+			if (request.mode === 'shared') {
+				let shared = record.shared.filter((entry) => entry.token !== token);
+				if (shared.length === record.shared.length) {
+					return;
+				}
+				record.shared = shared;
+			} else {
+				if (record.exclusive?.token !== token) {
+					return;
+				}
+				record.exclusive = null;
+			}
+
+			let released = await putLockMutationGuard(bucket, request.key, record, current);
+			if (released !== null) {
+				return;
+			}
+		} catch {}
+		await waitForLockMutationGuard(LOCK_MUTATION_GUARD_RETRY_MS);
+	}
+}
+
+async function acquireLockMutationGuards(
+	bucket: R2Bucket,
+	paths: string[],
+	sidecarConfig: SidecarConfig,
+): Promise<LockMutationGuard | null> {
+	let modes = new Map<string, LockMutationGuardMode>();
+
+	for (let resourcePath of paths) {
+		let ancestors = getAncestorPaths(resourcePath).filter((path) => path !== '');
+		for (let ancestor of ancestors) {
+			if (ancestor === resourcePath) {
+				continue;
+			}
+			if (!modes.has(ancestor)) {
+				modes.set(ancestor, 'shared');
+			}
+		}
+		modes.set(resourcePath, 'exclusive');
+	}
+
+	let requests: LockMutationGuardRequest[] = [];
+	for (let [path, mode] of modes) {
+		requests.push({ key: await getLockMutationGuardKey(sidecarConfig, path), mode });
+	}
+	requests.sort((left, right) => left.key.localeCompare(right.key));
+
+	let token = crypto.randomUUID();
+	let acquired: LockMutationGuardRequest[] = [];
+	for (let request of requests) {
+		let stored: R2Object | null = null;
+		for (let attempt = 0; attempt < LOCK_MUTATION_GUARD_ATTEMPTS; attempt += 1) {
+			stored = await tryAcquireLockMutationGuard(bucket, request, token);
+			if (stored !== null) {
+				break;
+			}
+			await waitForLockMutationGuard(LOCK_MUTATION_GUARD_RETRY_MS);
+		}
+		if (stored === null) {
+			for (let held of acquired.reverse()) {
+				await releaseLockMutationGuard(bucket, held, token);
+			}
+			return null;
+		}
+		acquired.push(request);
+	}
+
+	return {
+		async release(): Promise<void> {
+			for (let request of acquired.reverse()) {
+				await releaseLockMutationGuard(bucket, request, token);
+			}
+		},
+	};
+}
+
+export async function acquireResourceMutationGuard(
+	bucket: R2Bucket,
+	resourcePath: string,
+	sidecarConfig: SidecarConfig = DEFAULT_SIDECAR_CONFIG,
+): Promise<LockMutationGuard | null> {
+	return acquireLockMutationGuards(bucket, [resourcePath], sidecarConfig);
+}
+
+export async function acquireResourceMutationGuards(
+	bucket: R2Bucket,
+	resourcePaths: string[],
+	sidecarConfig: SidecarConfig = DEFAULT_SIDECAR_CONFIG,
+): Promise<LockMutationGuard | null> {
+	return acquireLockMutationGuards(bucket, [...new Set(resourcePaths)], sidecarConfig);
 }
 
 export async function findMatchingLock(
